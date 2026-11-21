@@ -4,11 +4,12 @@ Quick start::
 
     from lanlock import MihomoConfig
 
-    cfg = MihomoConfig()                 # defaults to ~/.config/clashtui/mihomo
+    cfg = MihomoConfig()                 # ClashTUI override, or a FlClash profile
     text, changed = cfg.add("corp.example")
     if changed:
         cfg.save(text)
-    cfg.apply(log=print)                 # regenerate and reload via the Mihomo API
+    cfg.apply(log=print)                 # regenerate and reload (ClashTUI), or
+                                         # report the restart FlClash needs
     for row in cfg.audit(log=print):     # check DNS and observed routing decisions
         print(row["domain"], row["verdict"])
 

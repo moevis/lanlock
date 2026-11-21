@@ -46,6 +46,7 @@ class FakeConfig:
         self.rows_error = None
         self.add_error = None
 
+        self.flclash = False
         self.apply_result = apply_result
         self.apply_error = None
         self.apply_calls = 0
@@ -92,7 +93,7 @@ class FakeConfig:
         return [{"domain": d, "rule": d in rules, "filter": d in filt}
                 for d in sorted(rules | filt)]
 
-    def save(self, text):
+    def save(self, text, expect=None):
         if self.save_error is not None:
             raise self.save_error
         self.saves.append(text)
@@ -362,6 +363,20 @@ def test_apply_is_single_flight_and_keeps_newer_edits():
             assert app.dirty  # the newer edit was never marked clean
             assert any(r["domain"] == "new.example" for r in app.rows)
             assert cfg.apply_domains == [["corp.example", "first.example"]]
+    asyncio.run(scenario())
+
+
+def test_apply_on_flclash_reports_saved_not_applied():
+    async def scenario():
+        cfg = FakeConfig()
+        cfg.flclash = True
+        app = Harness(cfg)
+        async with app.run_test():
+            app.action_apply()
+            await _wait_event(app.apply_done)
+            log = _log(app)
+            assert "saved" in log and "select the profile in FlClash" in log
+            assert "[green]applied[/]" not in log
     asyncio.run(scenario())
 
 

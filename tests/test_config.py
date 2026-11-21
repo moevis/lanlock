@@ -64,9 +64,9 @@ def test_macos_reads_override_from_xdg_install_when_native_missing(macos_home, t
     _install_override(xdg / "clashtui" / "mihomo", "xdg override\n")
     monkeypatch.setenv("XDG_CONFIG_HOME", os.fspath(xdg))
 
-    resolved = config_mod._default_config_dir()
-    assert resolved == os.path.join(os.fspath(xdg), "clashtui", "mihomo")
-    assert MihomoConfig(resolved).read() == "xdg override\n"
+    assert config_mod._clashtui_dir() == os.path.join(os.fspath(xdg), "clashtui", "mihomo")
+    assert config_mod.resolve() == ("clashtui", os.path.join(os.fspath(xdg), "clashtui", "mihomo"))
+    assert MihomoConfig().read() == "xdg override\n"
 
 
 def test_macos_prefers_native_override_over_xdg_install(macos_home, tmp_path, monkeypatch):
@@ -75,9 +75,11 @@ def test_macos_prefers_native_override_over_xdg_install(macos_home, tmp_path, mo
     _install_override(xdg / "clashtui" / "mihomo", "xdg override\n")
     monkeypatch.setenv("XDG_CONFIG_HOME", os.fspath(xdg))
 
-    resolved = config_mod._default_config_dir()
-    assert resolved == os.path.join("~/.config", "clashtui", "mihomo")
-    assert MihomoConfig(resolved).read() == "native override\n"
+    assert config_mod._clashtui_dir() == os.path.join("~/.config", "clashtui", "mihomo")
+    backend, resolved = config_mod.resolve(backend="clashtui")
+    assert backend == "clashtui"
+    assert resolved == os.path.expanduser("~/.config/clashtui/mihomo")
+    assert MihomoConfig(backend="clashtui").read() == "native override\n"
 
 
 def test_portable_layout_beside_real_executable_selects_override(tmp_path, monkeypatch):
@@ -88,7 +90,7 @@ def test_portable_layout_beside_real_executable_selects_override(tmp_path, monke
     monkeypatch.setattr(config_mod.shutil, "which",
                         lambda name: os.fspath(binary) if name == "clashtui" else None)
 
-    resolved = config_mod._default_config_dir()
+    resolved = config_mod._clashtui_dir()
     assert resolved == os.path.join(os.fspath(binary.parent), "data", "mihomo")
     assert MihomoConfig(resolved).read() == "portable override\n"
 
@@ -107,7 +109,7 @@ def test_portable_layout_follows_symlinked_executable(tmp_path, monkeypatch):
         pytest.skip("symlinks unavailable")
     monkeypatch.setattr(config_mod.shutil, "which", lambda name: os.fspath(link))
 
-    resolved = config_mod._default_config_dir()
+    resolved = config_mod._clashtui_dir()
     assert resolved == os.path.join(os.fspath(installed), "data", "mihomo")
     assert MihomoConfig(resolved).read() == "portable symlink override\n"
 
@@ -329,8 +331,9 @@ def test_failure_history_ignores_corrupt_files_and_bad_entries(tmp_path):
 
 def test_failure_history_is_scoped_to_the_controller(tmp_path):
     state = tmp_path / "state"
-    first = MihomoConfig(state_dir=state, api="http://127.0.0.1:9090")
-    second = MihomoConfig(state_dir=state, api="http://127.0.0.1:9091")
+    core = tmp_path / "mihomo"
+    first = MihomoConfig(core, state_dir=state, api="http://127.0.0.1:9090")
+    second = MihomoConfig(core, state_dir=state, api="http://127.0.0.1:9091")
     first.record_failure({"host": "a.example", "port": 1, "rule": "r",
                           "payload": "", "outbound": "DIRECT", "detail": "a"})
     second.record_failure({"host": "b.example", "port": 2, "rule": "r",

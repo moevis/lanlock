@@ -3,22 +3,34 @@ import argparse
 import sys
 
 from . import __version__
-from .config import DEFAULT_API, DEFAULT_CONFIG_DIR, MihomoConfig, norm
+from .config import DEFAULT_API, DEFAULT_RESOLVER, MihomoConfig, norm
 
 
 def _cfg(args):
-    return MihomoConfig(config_dir=args.config_dir, api=args.api,
-                        profile=args.profile)
+    return MihomoConfig(config_dir=args.config_dir, api=args.api, profile=args.profile,
+                        resolver=args.resolver, backend=args.backend)
 
 
 def build_parser():
     p = argparse.ArgumentParser(prog="mihomo-internal",
                                 description="keep internal domains on DIRECT in mihomo")
     p.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
-    p.add_argument("--config-dir", default=DEFAULT_CONFIG_DIR)
+    p.add_argument("--config-dir", default=None,
+                   help="ClashTUI mihomo directory, or the FlClash data directory "
+                        "(default: detect one; error when both are installed)")
+    p.add_argument("--backend", choices=("clashtui", "flclash"), default=None,
+                   help="which configuration to edit (default: detect)")
     p.add_argument("--api", default=DEFAULT_API,
                    help="Mihomo controller URL (default: %(default)s)")
-    p.add_argument("--profile", default=None, help="clashtui profile (auto-detected)")
+    p.add_argument("--profile", default=None,
+                   help="clashtui profile name, or a FlClash profile name or id "
+                        "(auto-detected)")
+    p.add_argument("--resolver", default=DEFAULT_RESOLVER,
+                   help="resolvers written to dns.nameserver-policy for each domain in "
+                        "a FlClash profile (default: %(default)s); a configured "
+                        "direct-nameserver can bypass it unless "
+                        "direct-nameserver-follow-policy is on")
+
     sub = p.add_subparsers(dest="cmd", required=True)
 
     sub.add_parser("ls", help="list registered domains")
@@ -56,6 +68,10 @@ def tui_main(argv=None):
 
 def main(argv=None):
     args = build_parser().parse_args(argv)
+    # Report a missing TUI extra before resolving a backend: the extra is what
+    # the user asked for, and it must not depend on any configuration existing.
+    if args.cmd == "tui" and _load_tui() is None:
+        return 2
     try:
         return _run(args, _cfg(args))
     except (OSError, ValueError) as e:
@@ -69,11 +85,12 @@ def _run(args, cfg):
         return 2 if tui is None else tui.run(cfg)
 
     domains = list(dict.fromkeys(map(norm, args.domains))) if args.cmd in ("add", "rm") else []
-    text = cfg.read()
+    text = original = cfg.read()
     if args.cmd == "ls":
         for row in cfg.rows(text):
             print(f"{row['domain']:40s} rule={'y' if row['rule'] else '-'} "
                   f"filter={'y' if row['filter'] else '-'}")
+        print("backend:", f"{cfg.backend} ({cfg.config_dir})")
         print("profile:", cfg.active_profile() or "?")
         return 0
 
@@ -90,12 +107,12 @@ def _run(args, cfg):
         if not added:
             print("already in sync")
             return 0
-        cfg.save(text)
+        cfg.save(text, expect=original)
         for d, kind in added:
             print(f"+{kind:6s} {d}")
         print(f"edited {cfg.override} (backup: {cfg.override}.bak)")
         if not args.no_apply:
-            ok = cfg.apply(log=print, domains=[d for d, _ in added])
+            ok = cfg.apply(log=print, domains=list(dict.fromkeys(d for d, _ in added)))
             return 0 if ok else 1
         return 0
 
@@ -110,7 +127,7 @@ def _run(args, cfg):
             messages.append(f"{'removed' if edited else 'absent '} {d}")
         changed |= edited
     if changed:
-        cfg.save(text)
+        cfg.save(text, expect=original)
     for message in messages:
         print(message)
     if changed:

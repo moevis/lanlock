@@ -1,19 +1,28 @@
-"""Static config editing for the clashtui-managed mihomo.
+"""Static config editing for the clashtui-managed mihomo, or for FlClash.
 
-The override file is the source of truth; clashtui regenerates ``config.yaml``
-from it (profile + override merge), so nothing here ever edits the artifact.
+ClashTUI: the override file is the source of truth; clashtui regenerates
+``config.yaml`` from it (profile + override merge), so nothing here ever edits
+the artifact.
+
+FlClash: the selected profile YAML is the source of truth; FlClash regenerates
+``config.yaml`` from it whenever it starts the core, so the profile is edited
+and the core has to be restarted by hand.
 """
 import ipaddress
 import json
 import os
+import plistlib
 import re
 import shutil
 import socket
+import sqlite3
 import subprocess
 import sys
 import time
 from collections.abc import Mapping
+from contextlib import closing
 from io import StringIO
+from pathlib import Path
 from stat import S_IMODE
 from tempfile import NamedTemporaryFile
 
@@ -23,9 +32,27 @@ from ruamel.yaml.error import YAMLError
 from ruamel.yaml.scalarstring import SingleQuotedScalarString
 
 _OVERRIDE_FILE = "core_override_config.yaml"
+_FLCLASH_APP_ID = "com.follow.clash"
+_FLCLASH_DIR_ENV = "LANLOCK_FLCLASH_DIR"
+# FlClash's compiled-in DNS defaults (defaultDns in the app bundle). Used to seed
+# a newly created fake-ip-filter when config.yaml has not been generated yet, so
+# the entries the app would have applied are not silently dropped.
+_FLCLASH_DEFAULT_FAKE_IP_FILTER = (
+    "dns.msftnsci.com",
+    "www.msftnsci.com",
+    "www.msftconnecttest.com",
+)
+# FlClash merges the profile over its own DNS defaults, so a domain only needs a
+# resolver that can see the internal zone: the OS resolver reaches the DNS that
+# actually serves it (a public DoH cannot).
+DEFAULT_RESOLVER = "system://"
 
 
-def _default_config_dir():
+_BACKENDS = ("clashtui", "flclash")
+
+
+def _clashtui_dir():
+    """ClashTUI's mihomo directory: portable install, native config, then XDG."""
     binary = shutil.which("clashtui")
     if binary:
         portable = os.path.join(os.path.dirname(os.path.realpath(binary)), "data")
@@ -51,6 +78,125 @@ def _default_config_dir():
     return config_dir
 
 
+def _flclash_candidates():
+    env = os.environ.get(_FLCLASH_DIR_ENV)
+    if env:
+        yield env
+    if sys.platform == "win32":
+        base = os.environ.get("APPDATA") or "~/AppData/Roaming"
+    elif sys.platform == "linux":
+        base = os.environ.get("XDG_DATA_HOME") or "~/.local/share"
+    else:
+        base = "~/Library/Application Support"
+    yield os.path.join(base, _FLCLASH_APP_ID)
+
+
+def _is_flclash_dir(path):
+    """FlClash keeps its profile index in SQLite next to the profiles it indexes."""
+    return (os.path.isfile(os.path.join(path, "database.sqlite"))
+            and os.path.isdir(os.path.join(path, "profiles")))
+
+
+def _flclash_dir():
+    for candidate in _flclash_candidates():
+        if _is_flclash_dir(os.path.expanduser(candidate)):
+            return candidate
+    return None
+
+
+def _clashtui_ready(directory):
+    return os.path.isfile(os.path.join(os.path.expanduser(directory), _OVERRIDE_FILE))
+
+
+def resolve(config_dir=None, backend=None):
+    """Return ``(backend, directory)`` for the configuration lanlock edits.
+
+    Neither setup can be picked by mtime or process state, and guessing wrong
+    edits a file that governs nothing while looking successful, so a machine
+    that has both is an error instead of a silent choice.
+    """
+    if backend is not None and backend not in _BACKENDS:
+        raise ValueError(f"unknown backend {backend!r}; expected one of "
+                         f"{', '.join(_BACKENDS)}")
+    if config_dir is not None:
+        directory = os.path.expanduser(config_dir)
+        if backend is not None:
+            return backend, directory
+        markers = [name for name, ready in
+                   (("clashtui", _clashtui_ready(directory)),
+                    ("flclash", _is_flclash_dir(directory))) if ready]
+        if len(markers) > 1:
+            raise ValueError(f"{directory} holds both a ClashTUI override and a FlClash "
+                             "configuration; pass --backend clashtui|flclash")
+        return (markers[0] if markers else "clashtui"), directory
+
+    clashtui = _clashtui_dir()
+    found = []
+    if backend in (None, "clashtui") and _clashtui_ready(clashtui):
+        found.append(("clashtui", os.path.expanduser(clashtui)))
+    flclash = _flclash_dir() if backend in (None, "flclash") else None
+    if flclash is not None:
+        found.append(("flclash", os.path.expanduser(flclash)))
+    if len(found) > 1:
+        raise ValueError(
+            "found both a ClashTUI override and a FlClash configuration:\n  "
+            + "\n  ".join(f"{name}: {path}" for name, path in found)
+            + "\npass --backend clashtui|flclash to choose which one to edit")
+    if found:
+        return found[0]
+    if backend == "flclash":
+        directory = flclash or next(iter(_flclash_candidates()))
+        raise ValueError(f"no FlClash configuration at {os.path.expanduser(directory)}: "
+                         "database.sqlite not found")
+    raise ValueError(
+        "ClashTUI Mihomo override missing. Start ClashTUI to initialize it, pass "
+        f"--config-dir pointing to its mihomo directory ({os.path.expanduser(clashtui)}), "
+        "or use --backend flclash")
+
+
+def _flclash_prefs():
+    """Return FlClash's own settings, or ``{}`` when they cannot be read.
+
+    FlClash (a Flutter app) stores app settings as a JSON string under
+    ``flutter.config`` in the platform preference store.
+    """
+    if sys.platform == "win32":
+        base = os.environ.get("APPDATA") or "~/AppData/Roaming"
+        path = os.path.join(base, _FLCLASH_APP_ID, "shared_preferences.json")
+    elif sys.platform == "darwin":
+        path = "~/Library/Preferences/com.follow.clash.plist"
+    else:
+        base = os.environ.get("XDG_DATA_HOME") or "~/.local/share"
+        path = os.path.join(base, _FLCLASH_APP_ID, "shared_preferences.json")
+    path = os.path.expanduser(path)
+    try:
+        if path.endswith(".plist"):
+            with open(path, "rb") as f:
+                raw = plistlib.load(f).get("flutter.config")
+        else:
+            with open(path, encoding="utf-8") as f:
+                raw = json.load(f).get("flutter.config")
+        settings = json.loads(raw)
+    except (OSError, ValueError, TypeError, AttributeError, plistlib.InvalidFileException):
+        return {}
+    return settings if isinstance(settings, dict) else {}
+
+
+def _flclash_selected_profile_id():
+    """Return FlClash's selected profile id from its own settings, or None."""
+    try:
+        return int(_flclash_prefs()["currentProfileId"])
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+def _flclash_patch_dns():
+    """FlClash's app-level DNS settings, the profile-independent baseline."""
+    patch = _flclash_prefs().get("patchClashConfig")
+    dns = patch.get("dns") if isinstance(patch, dict) else None
+    return dns if isinstance(dns, dict) else {}
+
+
 def _default_state_dir():
     if sys.platform == "win32":
         base = os.environ.get("LOCALAPPDATA") or "~/AppData/Local"
@@ -61,7 +207,6 @@ def _default_state_dir():
     return os.path.join(base, "mihomo-internal")
 
 
-DEFAULT_CONFIG_DIR = _default_config_dir()
 DEFAULT_STATE_DIR = _default_state_dir()
 DEFAULT_API = "http://127.0.0.1:9090"
 FAILURE_HISTORY_MAX = 200
@@ -73,6 +218,20 @@ _DEFAULT_FAKE_IP_NETWORKS = (ipaddress.ip_network(DEFAULT_FAKE_IP_RANGE, strict=
 _LABEL = r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?"
 _DOMAIN_RE = re.compile(rf"{_LABEL}(?:\.{_LABEL})*")
 _LATE_RULES = {"IP-CIDR", "IP-CIDR6", "GEOIP", "GEOSITE", "MATCH"}
+_INDENTED_SEQUENCE = re.compile(r"^ +- ", re.MULTILINE)
+_INDENTLESS_SEQUENCE = re.compile(r"^- ", re.MULTILINE)
+
+
+def _indent_style(text):
+    """Return indent settings that match the file's own sequence style.
+
+    ruamel normalises block sequences to one style, so dumping an override that
+    indents its sequences without this would rewrite every line of a profile
+    the edit has nothing to do with.
+    """
+    if len(_INDENTED_SEQUENCE.findall(text)) > len(_INDENTLESS_SEQUENCE.findall(text)):
+        return {"mapping": 2, "sequence": 4, "offset": 2}
+    return {"mapping": 2, "sequence": 2, "offset": 0}
 
 
 def norm(raw):
@@ -177,10 +336,15 @@ def _require_editable(*nodes):
 
 
 class _Override:
-    def __init__(self, text):
+    def __init__(self, text, *, create_sections=False, seed_filters=(),
+                 seed_filter_mode="blacklist"):
         self.text = text
+        self._create_sections = create_sections
+        self._seed_filters = list(seed_filters)
+        self._seed_filter_mode = seed_filter_mode
         self.yaml = YAML()
         self.yaml.preserve_quotes = True
+        self.yaml.indent(**_indent_style(text))
         try:
             root = self.yaml.load(text)
         except YAMLError as e:
@@ -191,9 +355,11 @@ class _Override:
         self.rules = _section(self.root, "rules", CommentedSeq)
         self.dns = _section(self.root, "dns", CommentedMap)
         self.filters = _section(self.dns, "fake-ip-filter", CommentedSeq)
+        self._has_filters = "fake-ip-filter" in self.dns
+        self.policy = _section(self.dns, "nameserver-policy", CommentedMap)
         self.rule_domains = self._domains(self.rules, _rule_domain)
-        mode = self.dns.get("fake-ip-filter-mode", "blacklist")
-        self.filter_domains = self._domains(self.filters, _filter_domain) if mode == "blacklist" else set()
+        self.filter_domains = (self._domains(self.filters, _filter_domain)
+                               if self._filter_mode() == "blacklist" else set())
 
     @staticmethod
     def _domains(entries, parse):
@@ -203,8 +369,12 @@ class _Override:
         return [{"domain": d, "rule": d in self.rule_domains, "filter": d in self.filter_domains}
                 for d in sorted(self.rule_domains | self.filter_domains)]
 
+    def _filter_mode(self):
+        """The effective mode, including the backend's own baseline when unset."""
+        return self.dns.get("fake-ip-filter-mode") or self._seed_filter_mode
+
     def _edit_filters(self):
-        if self.dns.get("fake-ip-filter-mode", "blacklist") != "blacklist":
+        if self._filter_mode() != "blacklist":
             raise ValueError("editing fake-ip-filter requires blacklist mode")
         _require_editable(self.root, self.dns, self.filters)
 
@@ -225,17 +395,78 @@ class _Override:
         if domain in self.filter_domains:
             return False
         self._require_section("dns")
+        if not self._has_filters:
+            # A partial dns section still replaces the inherited list key by key.
+            self.filters = CommentedSeq(
+                SingleQuotedScalarString(entry) for entry in self._seed_filters)
+            self._has_filters = True
         self.filters.append(SingleQuotedScalarString(f"+.{domain}"))
         self.dns["fake-ip-filter"] = self.filters
         self.root["dns"] = self.dns
         self.filter_domains.add(domain)
         return True
 
+    @staticmethod
+    def _policy_key(domain):
+        return f"+.{domain}"
+
+    def add_policy(self, domain, servers):
+        """Resolve one domain through ``servers`` so a DIRECT dial can resolve it.
+
+        An existing entry is left alone: it is the user's choice of resolver.
+        """
+        if self._policy_key(domain) in self.policy:
+            return False
+        self._require_section("dns")
+        _require_editable(self.root, self.dns, self.policy)
+        self.policy[SingleQuotedScalarString(self._policy_key(domain))] = CommentedSeq(servers)
+        self.dns["nameserver-policy"] = self.policy
+        return True
+
+    def has_policy(self, domain):
+        return self._policy_key(domain) in self.policy
+
+    def remove_policy(self, domain, servers):
+        """Drop the policy entry only if it still names lanlock's own resolvers.
+
+        A resolver the user chose is left alone: deleting it would silently move
+        that domain back onto the public resolvers.
+        """
+        key = self._policy_key(domain)
+        current = self.policy.get(key)
+        if current is None:
+            return False
+        current = [current] if isinstance(current, str) else [str(entry) for entry in current]
+        if current != [str(entry) for entry in servers]:
+            return False
+        _require_editable(self.root, self.dns, self.policy)
+        del self.policy[key]
+        if not self.policy:
+            del self.dns["nameserver-policy"]
+        return True
+
     def _require_section(self, key):
-        # ClashTUI replaces entire top-level sections in the selected profile.
-        if self.root.get(key) is None:
+        """Materialise a missing section when the backend merges, not replaces.
+
+        ClashTUI replaces entire top-level sections in the selected profile, so a
+        missing ``rules`` or ``dns`` section must be copied from the profile
+        first. FlClash merges the profile over its own DNS key by key, so a
+        partial section is safe; the filter list is seeded with the entries the
+        generated configuration already has, which keeps them in effect.
+        """
+        if self.root.get(key) is not None:
+            return
+        if not self._create_sections:
             raise ValueError(f"copy the profile's {key} section into the override first; "
                              f"adding it would replace the profile's {key} settings")
+        if key == "rules":
+            self.rules = CommentedSeq()
+            self.root["rules"] = self.rules
+            return
+        self.dns = CommentedMap()
+        self.filters = CommentedSeq()
+        self.policy = CommentedMap()
+        self.root["dns"] = self.dns
 
     def remove(self, domain):
         changed = False
@@ -279,20 +510,29 @@ def _atomic_write(path, text, mode):
 
 
 class MihomoConfig:
-    def __init__(self, config_dir=DEFAULT_CONFIG_DIR, api=DEFAULT_API, profile=None,
-                 state_dir=None):
-        self.config_dir = os.path.expanduser(config_dir)
+    def __init__(self, config_dir=None, api=DEFAULT_API, profile=None,
+                 state_dir=None, resolver=DEFAULT_RESOLVER, backend=None):
+        self.backend, self.config_dir = resolve(config_dir, backend)
+        self.flclash = self.backend == "flclash"
         self.api = api
         self.profile_override = profile
         self.state_dir = os.path.expanduser(state_dir or DEFAULT_STATE_DIR)
+        if not isinstance(resolver, str) or not resolver.strip():
+            raise ValueError("--resolver must name a DNS server, for example system://")
+        self.resolver = resolver.strip()
+        self._flclash_profile = None
 
     # ---------- paths ----------
     @property
     def override(self):
+        if self.flclash:
+            return os.path.join(self.profiles_dir, f"{self._flclash_target()[0]}.yaml")
         return os.path.join(self.config_dir, _OVERRIDE_FILE)
 
     @property
     def generated(self):
+        if self.flclash:
+            return os.path.join(self.config_dir, "config.yaml")
         settings = os.path.join(os.path.dirname(os.path.abspath(self.config_dir)), "config.yaml")
         try:
             config = YAML(typ="safe").load(self.read(settings)) or {}
@@ -337,15 +577,164 @@ class MihomoConfig:
     def profiles_dir(self):
         return os.path.join(self.config_dir, "profiles")
 
+    # ---------- FlClash profile index ----------
+    def _flclash_query(self, sql, params=(), missing_ok=False):
+        path = os.path.join(self.config_dir, "database.sqlite")
+        uri = Path(os.path.abspath(path)).as_uri() + "?mode=ro"
+        try:
+            with closing(sqlite3.connect(uri, uri=True)) as db:
+                return db.execute(sql, params).fetchall()
+        except sqlite3.OperationalError as e:
+            # An older FlClash may lack a column or table; that is not a reason
+            # to refuse every edit, only the feature that needs it.
+            if missing_ok and "no such" in str(e):
+                return []
+            raise OSError(f"cannot read FlClash data from {path}: {e}") from e
+        except sqlite3.Error as e:
+            raise OSError(f"cannot read FlClash data from {path}: {e}") from e
+
+    def _flclash_rows(self):
+        """Return ``(id, label, type, overrides)`` for every FlClash profile."""
+        rows = self._flclash_query(
+            'SELECT id, label, type, overrides FROM profiles ORDER BY "order", id',
+            missing_ok=True)
+        if not rows:
+            rows = self._flclash_query(
+                'SELECT id, label FROM profiles ORDER BY "order", id')
+        return [(int(row[0]), str(row[1]), str(row[2] if len(row) > 2 else ""),
+                 row[3] if len(row) > 3 else None) for row in rows]
+
+    @staticmethod
+    def _flclash_label(row):
+        return f"{row[1]} (#{row[0]})"
+
+    def _flclash_target(self):
+        """Return the ``(id, label, type, overrides)`` row to edit, cached per config."""
+        if self._flclash_profile is not None:
+            return self._flclash_profile
+        rows = self._flclash_rows()
+        if not rows:
+            raise ValueError("no profiles in the FlClash configuration")
+        available = ", ".join(self._flclash_label(row) for row in rows)
+        chosen = None
+        if self.profile_override:
+            wanted = self.profile_override
+            matches = [row for row in rows if str(row[0]) == wanted or row[1] == wanted]
+            if not matches:
+                raise ValueError(f"no FlClash profile {wanted!r}; available: {available}")
+            if len(matches) > 1:
+                raise ValueError(
+                    f"{wanted!r} matches more than one FlClash profile: "
+                    + ", ".join(self._flclash_label(row) for row in matches)
+                    + "; pass the profile id")
+            chosen = matches[0]
+        if chosen is None:
+            selected = _flclash_selected_profile_id()
+            chosen = next((row for row in rows if row[0] == selected), None)
+        if chosen is None and len(rows) == 1:
+            chosen = rows[0]
+        if chosen is None:
+            raise ValueError("cannot tell which FlClash profile is selected; "
+                             f"pass --profile (available: {available})")
+        self._flclash_profile = chosen
+        return chosen
+
+    # DNS keys this backend writes into a profile.
+    _EDITED_DNS_KEYS = ("fake-ip-filter", "fake-ip-filter-mode", "nameserver-policy")
+
+    @staticmethod
+    def _dns_override_keys(row):
+        raw = row[3]
+        if not raw:
+            return ()
+        try:
+            overrides = json.loads(raw)
+        except (TypeError, ValueError):
+            return ()
+        if not isinstance(overrides, dict):
+            return ()
+        for name, value in overrides.items():
+            if str(name).lower().replace("_", "") == "dnsoverridekeys":
+                if isinstance(value, dict):
+                    return tuple(str(key) for key in value)
+                if isinstance(value, (list, tuple)):
+                    return tuple(str(item) for item in value)
+        return ()
+
+    def _flclash_added_rule(self, profile_id, domain):
+        """Return FlClash's added rule covering ``domain``, or None.
+
+        FlClash prepends the added rules from its database to the profile's own
+        rules, so one of those wins over a rule written here.
+        """
+        rows = self._flclash_query(
+            "SELECT rule_action, content FROM rules WHERE profile_id = ?", (profile_id,),
+            missing_ok=True)
+        for action, content in rows:
+            action, content = str(action or "").upper(), str(content or "").strip().lower()
+            if not content:
+                continue
+            if action in ("DOMAIN", "DOMAIN-SUFFIX") and (
+                    domain == content or domain.endswith("." + content)):
+                return f"{action},{content}"
+            if action == "DOMAIN-KEYWORD" and content in domain:
+                return f"{action},{content}"
+        return None
+
+    def _flclash_edit_guard(self, domain=None):
+        """Refuse edits that FlClash's own settings would shadow or already make."""
+        if not self.flclash:
+            return
+        row = self._flclash_target()
+        if row[2] and row[2] != "file":
+            raise ValueError(
+                f"{self._flclash_label(row)} is a {row[2]} profile; lanlock edits the file "
+                "of a local profile. Export it as a file profile (or change it in "
+                "FlClash's editor) first")
+        clashes = [key for key in self._EDITED_DNS_KEYS if key in self._dns_override_keys(row)]
+        if clashes:
+            raise ValueError(
+                f"{self._flclash_label(row)} overrides {', '.join(clashes)} in FlClash's own "
+                "settings, which replace the profile's values; clear that override first")
+        if domain is not None:
+            shadow = self._flclash_added_rule(row[0], domain)
+            if shadow:
+                raise ValueError(
+                    f"FlClash's added rule {shadow!r} is applied before the profile's rules "
+                    f"and already covers {domain}; edit it in FlClash instead")
+
+    def _flclash_seed(self):
+        """The fake-IP filter list and mode a profile without one inherits.
+
+        Read from FlClash's app-level DNS settings, which do not depend on the
+        profile. The generated ``config.yaml`` must not be used: it is the merged
+        result of whichever profile ran last, so it would seed one profile with
+        another profile's list.
+        """
+        settings = _flclash_patch_dns()
+        filters = settings.get("fake-ip-filter")
+        mode = settings.get("fake-ip-filter-mode")
+        return ([str(entry) for entry in filters] if isinstance(filters, list)
+                else list(_FLCLASH_DEFAULT_FAKE_IP_FILTER),
+                str(mode or "blacklist"))
+
     # ---------- yaml ----------
     def read(self, path=None):
         """Return the file as ``\\n``-separated text, whatever its line endings."""
+        target = self.override if path is None else path
         try:
-            with open(self.override if path is None else path, encoding="utf-8") as f:
+            with open(target, encoding="utf-8") as f:
                 return f.read()
         except FileNotFoundError as e:
             if path is not None:
                 raise
+            if self.flclash:
+                raise FileNotFoundError(
+                    e.errno,
+                    f"FlClash profile {self._flclash_target()[1]!r} is missing its "
+                    f"profile file: {target}",
+                    e.filename,
+                ) from None
             raise FileNotFoundError(
                 e.errno,
                 "ClashTUI Mihomo override missing. Start ClashTUI to initialize it "
@@ -353,12 +742,14 @@ class MihomoConfig:
                 e.filename,
             ) from None
 
-    def save(self, text):
+    def save(self, text, expect=None):
         """Validate first, then replace the override atomically and keep one backup.
 
         ``text`` is treated as ``\\n``-separated and written with the newline style
         the file already uses, so a CRLF override stays CRLF and a no-op save does
-        not rewrite the file.
+        not rewrite the file. ``expect`` is the text the caller read before
+        editing: a file that changed since then is refused instead of overwritten,
+        because FlClash (or its own editor) may have written it in between.
         """
         text = text.replace("\r\n", "\n").replace("\r", "\n")
         _Override(text)
@@ -366,6 +757,9 @@ class MihomoConfig:
         with open(path, encoding="utf-8", newline="") as f:
             before = f.read()
             mode = S_IMODE(os.fstat(f.fileno()).st_mode)
+        if expect is not None and before != expect:
+            raise ValueError(f"{path} changed since it was read; re-run to edit the "
+                             "current version")
         newline = "\r\n" if "\r\n" in before else "\n"
         updated = text.replace("\n", newline)
         if before != updated:
@@ -376,38 +770,61 @@ class MihomoConfig:
     def rows(self, text=None):
         return self._override(text).rows()
 
-    def _override(self, text):
+    def _override(self, text=None):
+        if self.flclash:
+            seed_filters, seed_mode = self._flclash_seed()
+            return _Override(self.read() if text is None else text,
+                             create_sections=True, seed_filters=seed_filters,
+                             seed_filter_mode=seed_mode)
         return _Override(self.read() if text is None else text)
 
     def add_rule_only(self, text, domain):
+        self._flclash_edit_guard(norm(domain))
         config = self._override(text)
         changed = config.add_rule(norm(domain))
         return config.render(changed), changed
 
     def add_filter_only(self, text, domain):
+        self._flclash_edit_guard(norm(domain))
         config = self._override(text)
         changed = config.add_filter(norm(domain))
         return config.render(changed), changed
 
     def add(self, domain, text=None):
-        """Add rule + fake-ip-filter entry. Returns (text, changed)."""
+        """Add rule + fake-ip-filter entry. Returns (text, changed).
+
+        FlClash also gets a ``nameserver-policy`` entry for the domain: its
+        profile is merged over DNS defaults whose resolvers are public, and a
+        public resolver cannot answer for an internal zone, so a DIRECT dial
+        would fail without one.
+        """
         domain = norm(domain)
+        self._flclash_edit_guard(domain)
         config = self._override(text)
         rule = config.add_rule(domain)
         filtered = config.add_filter(domain)
-        changed = rule or filtered
+        policy = config.add_policy(domain, [self.resolver]) if self.flclash else False
+        changed = rule or filtered or policy
         return config.render(changed), changed
 
     def remove(self, domain, text=None):
+        domain = norm(domain)
+        self._flclash_edit_guard(domain)
         config = self._override(text)
-        changed = config.remove(norm(domain))
+        changed = config.remove(domain)
+        if self.flclash:
+            changed = config.remove_policy(domain, [self.resolver]) or changed
         return config.render(changed), changed
 
     def sync(self, text=None):
         """Make rules and fake-ip-filter agree in both directions.
 
+        Policies are not created here: a domain that is merely registered is not
+        evidence that its resolver should change. ``add`` writes them.
+
         Returns (text, [(domain, "rule"|"filter"), ...]).
         """
+        self._flclash_edit_guard()
         config = self._override(text)
         added = []
         for row in config.rows():
@@ -418,10 +835,15 @@ class MihomoConfig:
             elif not row["rule"]:
                 config.add_rule(domain)
                 added.append((domain, "rule"))
-        return config.render(added), added
+        return config.render(bool(added)), added
 
-    # ---------- ClashTUI / Mihomo controller ----------
+    # ---------- ClashTUI / FlClash profiles, Mihomo controller ----------
     def profiles(self):
+        if self.flclash:
+            try:
+                return [row[1] for row in self._flclash_rows()]
+            except OSError:
+                return []
         try:
             result = self._clashtui("profile", "list", "--name-only")
         except (OSError, subprocess.TimeoutExpired):
@@ -431,6 +853,12 @@ class MihomoConfig:
         return [name.strip() for name in result.stdout.splitlines() if name.strip()]
 
     def active_profile(self):
+        """Return the profile name in use: FlClash's edit target, ClashTUI's selection."""
+        if self.flclash:
+            try:
+                return self._flclash_target()[1]
+            except (OSError, ValueError):
+                return None
         if self.profile_override:
             return self.profile_override
         try:
@@ -508,7 +936,14 @@ class MihomoConfig:
                       json.dumps(kept, ensure_ascii=False), 0o600)
 
     def apply(self, log=print, domains=None):
-        """Ask ClashTUI to regenerate and reload via the Mihomo API, then check DNS."""
+        """Regenerate and reload: through ClashTUI, or by handing back to FlClash.
+
+        FlClash has no command line and its Mihomo controller is off unless the
+        user configures one, so the profile is edited in place and FlClash
+        regenerates ``config.yaml`` the next time it starts the core.
+        """
+        if self.flclash:
+            return self._apply_flclash(log, domains)
         state = self.controller_state()
         if state != "ready":
             hint = " (check LANLOCK_API_SECRET)" if state == "unauthorized" else ""
@@ -547,6 +982,39 @@ class MihomoConfig:
                 d, "y" if has_rule else "n", "y" if has_filter else "n", ip, state))
         return True
 
+    def _apply_flclash(self, log=print, domains=None):
+        """Report what was saved and how to load it; never claim it is live.
+
+        FlClash has no command line and no controller here, so nothing reloads:
+        the profile on disk is only picked up when FlClash reapplies it.
+        """
+        try:
+            row = self._flclash_target()
+        except (OSError, ValueError) as e:
+            log(f"error: {e}")
+            return False
+        selected = _flclash_selected_profile_id()
+        log(f"profile: {self._flclash_label(row)}")
+        if selected is not None and selected != row[0]:
+            log(f"warning: FlClash has {self._flclash_label(row)} edited but not selected; "
+                "select it before reloading")
+        try:
+            document = self._override()
+            if domains is None:
+                domains = [entry["domain"] for entry in document.rows()]
+        except (OSError, ValueError) as e:
+            log(f"error: cannot read configuration: {e}")
+            return False
+        log(f"file: {self.override}")
+        for d in domains:
+            log("  %-36s rule=%s filter=%s policy=%s" % (
+                d, "y" if d in document.rule_domains else "n",
+                "y" if d in document.filter_domains else "n",
+                "y" if document.has_policy(d) else "n"))
+        log("saved, NOT applied: select this profile in FlClash and reapply it, or "
+            "stop and start the core, then run `check`")
+        return True
+
     # ---------- probing ----------
     def dns(self, domain):
         return dns_check(domain, networks=self.fake_ip_networks())
@@ -559,6 +1027,9 @@ class MihomoConfig:
     def audit(self, log=print, domains=None):
         from .probe import audit
         domains = [r["domain"] for r in self.rows()] if domains is None else domains
+        if self.flclash and self.controller_state() != "ready":
+            log("note: no Mihomo controller, so verdicts come from DNS alone "
+                "(pass --api once FlClash exposes one)")
         return audit(domains, api=self.api, log=log,
                      networks=self.fake_ip_networks())
 

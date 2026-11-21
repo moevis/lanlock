@@ -1,6 +1,6 @@
 [project]
 name = "lanlock"
-description = "Keep internal domains on DIRECT in a clashtui-managed mihomo, and prove it"
+description = "Keep internal domains on DIRECT in a clashtui-managed mihomo or FlClash, and prove it"
 readme = "README.md"
 requires-python = ">=3.10"
 license = "MIT"

@@ -15,7 +15,7 @@ from textual.screen import ModalScreen
 from textual.widgets import Button, DataTable, Footer, Header, Input, RichLog, Static
 
 from . import __version__
-from .config import DEFAULT_API, DEFAULT_CONFIG_DIR, MihomoConfig, norm
+from .config import DEFAULT_API, DEFAULT_RESOLVER, MihomoConfig, norm
 
 VERDICT_STYLE = {
     "ok": "green",
@@ -711,7 +711,7 @@ class LanlockApp(App):
             return
         text = self.text
         try:
-            self.cfg.save(text)
+            self.cfg.save(text, expect=self._saved_text)
         except (ValueError, OSError) as e:
             self.log_write(f"[red]error:[/] {e}")
             return
@@ -752,15 +752,15 @@ class LanlockApp(App):
         self._invalidate_audit()
         self.fill_table()
         self.refresh_status()
-        self._apply_worker(text, rows, needs_save)
+        self._apply_worker(text, rows, needs_save, self._saved_text)
 
     # Own group: a verify worker must never cancel an apply mid-write.
     @work(thread=True, exclusive=True, group="apply")
-    def _apply_worker(self, text: str, rows, needs_save: bool) -> None:
-        self.call_from_thread(self.log_write, "[b]applying[/] save -> clashtui reload -> dns")
+    def _apply_worker(self, text: str, rows, needs_save: bool, expect: str) -> None:
+        self.call_from_thread(self.log_write, "[b]applying[/] save -> reload -> dns")
         if needs_save:
             try:
-                self.cfg.save(text)
+                self.cfg.save(text, expect=expect)
             except Exception as e:  # the guard must never be stranded
                 self.call_from_thread(self._apply_save_failed, str(e))
                 return
@@ -792,6 +792,11 @@ class LanlockApp(App):
         if error is not None:
             self.log_write(f"[red]apply FAILED:[/] {error} — override saved, but the "
                            "generated config may not reflect it")
+        elif ok and self.cfg.flclash:
+            self.audit = {}
+            self.fill_table()
+            self.log_write("[green]saved[/] — select the profile in FlClash and reapply "
+                           "it, then press v to re-verify")
         elif ok:
             self.audit = {}
             self.fill_table()
@@ -857,9 +862,26 @@ def run(cfg=None):
 def main(argv=None):
     p = argparse.ArgumentParser(prog="mihomo-tui")
     p.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
-    p.add_argument("--config-dir", default=DEFAULT_CONFIG_DIR)
+    p.add_argument("--config-dir", default=None,
+                   help="ClashTUI mihomo directory, or the FlClash data directory "
+                        "(default: detect one; error when both are installed)")
+    p.add_argument("--backend", choices=("clashtui", "flclash"), default=None,
+                   help="which configuration to edit (default: detect)")
     p.add_argument("--api", default=DEFAULT_API,
                    help="Mihomo controller URL (default: %(default)s)")
-    p.add_argument("--profile", default=None, help="clashtui profile (auto-detected)")
+    p.add_argument("--profile", default=None,
+                   help="clashtui profile name, or a FlClash profile name or id "
+                        "(auto-detected)")
+    p.add_argument("--resolver", default=DEFAULT_RESOLVER,
+                   help="resolvers written to dns.nameserver-policy for each domain in "
+                        "a FlClash profile (default: %(default)s); a configured "
+                        "direct-nameserver can bypass it unless "
+                        "direct-nameserver-follow-policy is on")
     a = p.parse_args(argv)
-    return run(MihomoConfig(config_dir=a.config_dir, api=a.api, profile=a.profile))
+    try:
+        cfg = MihomoConfig(config_dir=a.config_dir, api=a.api, profile=a.profile,
+                           resolver=a.resolver, backend=a.backend)
+    except (OSError, ValueError) as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 2
+    return run(cfg)
