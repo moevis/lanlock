@@ -209,7 +209,7 @@ def _default_state_dir():
         base = "~/Library/Application Support"
     else:
         base = os.environ.get("XDG_STATE_HOME") or "~/.local/state"
-    return os.path.join(base, "mihomo-internal")
+    return os.path.join(base, "lanlock")
 
 
 DEFAULT_STATE_DIR = _default_state_dir()

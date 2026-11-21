@@ -365,3 +365,9 @@ def test_version_flag(capsys):
         cli.main(["--version"])
     assert exc.value.code == 0
     assert capsys.readouterr().out.strip() == f"lanlock {__version__}"
+
+
+def test_default_state_dir_uses_the_product_name(macos_home):
+    assert os.path.normpath(os.path.expanduser(config_mod._default_state_dir())) == \
+        os.path.normpath(os.path.join(os.fspath(macos_home), "Library",
+                                      "Application Support", "lanlock"))
