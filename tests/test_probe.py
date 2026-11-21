@@ -730,3 +730,71 @@ def test_redirect_is_rejected():
                                      headers={"Authorization": "Bearer s3cret"})
     assert probe_mod._NoRedirect().redirect_request(
         request, None, 302, "Found", {}, "http://198.51.100.1/version") is None
+
+
+FAILED_DIAL = ("[TCP] dial DIRECT (match DomainSuffix/corp.example) "
+               "198.18.0.1:5555(curl, uid=1000) --> bad.corp.example:443 "
+               "error: dial tcp 10.0.0.1:443: i/o timeout")
+
+
+def test_parse_failure_extracts_destination_and_rule():
+    assert probe_mod.parse_failure(FAILED_DIAL) == {
+        "host": "bad.corp.example", "port": 443, "rule": "DomainSuffix",
+        "payload": "corp.example", "outbound": "DIRECT", "detail": FAILED_DIAL}
+
+
+def test_parse_failure_ignores_lines_without_a_rule_or_error():
+    assert probe_mod.parse_failure(line(DOMAIN, 443, "DIRECT")) is None
+    assert probe_mod.parse_failure("[DNS] resolve bad.example error: timeout") is None
+    assert probe_mod.parse_failure("") is None
+    assert probe_mod.parse_failure(None) is None
+
+
+def test_parse_failure_keeps_ip_destinations():
+    failure = probe_mod.parse_failure(
+        "[TCP] dial DIRECT (match IPCIDR/10.0.0.0/8) 198.18.0.1:1 --> 10.1.2.3:443 "
+        "error: dial tcp 10.1.2.3:443: i/o timeout")
+    assert failure["host"] == "10.1.2.3"
+    assert failure["rule"] == "IPCIDR"
+
+
+def test_watch_once_reads_ndjson_until_idle(monkeypatch):
+    class Response:
+        status = 200
+
+        def __init__(self):
+            self.lines = [ndjson(FAILED_DIAL) + b"\n"]
+
+        def read1(self, size):
+            if self.lines:
+                return self.lines.pop(0)
+            raise TimeoutError
+
+    class Connection:
+        def __init__(self):
+            self.sock = _Sock()
+            self.response = Response()
+            self.path = None
+            self.closed = False
+
+        def request(self, method, path, headers=None):
+            self.path = path
+
+        def getresponse(self):
+            return self.response
+
+        def close(self):
+            self.closed = True
+
+    made = []
+
+    def factory(host, port, timeout=None):
+        connection = Connection()
+        made.append(connection)
+        return connection
+
+    monkeypatch.setattr(probe_mod.http.client, "HTTPConnection", factory)
+    failures = list(probe_mod._watch_once("http://127.0.0.1:9090", None))
+    assert [f["host"] for f in failures] == ["bad.corp.example"]
+    assert made[0].path == "/logs?level=warning"
+    assert made[0].closed

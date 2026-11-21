@@ -66,6 +66,21 @@ mihomo-internal sync --no-apply
 `mihomo-internal tui` and `mihomo-tui` are equivalent. The TUI requires the `tui`
 extra.
 
+### TUI keys
+
+`j`/`k` move, `a` add, `d` delete, `y` sync, `v` verify, `t` DNS test,
+`w` apply, `s` save, `r` reload, `l` live connections, `q` quit.
+
+Adding a host below a parent (`aaa.bbb.cc`) asks whether to add that host or
+`*.bbb.cc`. Both are stored as a `DOMAIN-SUFFIX` rule plus a matching
+`dns.fake-ip-filter` entry, so hosts below the chosen name are covered; an
+explicit `*.` or `+.` prefix skips the prompt.
+
+`l` lists the controller's open connections and the failed dials seen since
+the UI started. Mihomo keeps no history: `/connections` is live-only and
+`/logs` streams new lines, so failures are collected while the TUI runs.
+Select a row and press Enter to add that host (or its parent) to the list.
+
 Useful global options:
 
 ```text

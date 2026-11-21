@@ -4,6 +4,7 @@ Textual is an optional dependency: without it the whole module is skipped.
 Every config operation is a fake; nothing touches the real controller or network.
 """
 import asyncio
+import queue
 import re
 import threading
 
@@ -12,8 +13,9 @@ import pytest
 pytest.importorskip("textual")
 
 
-from lanlock.tui import LanlockApp  # noqa: E402
-from textual.widgets import Static  # noqa: E402
+from lanlock.tui import (FailureSeen, LanlockApp, LiveScreen, ScopeScreen,  # noqa: E402
+                         wildcard_parent)
+from textual.widgets import DataTable, Input, Static  # noqa: E402
 
 BASE_TEXT = """\
 rules:
@@ -65,6 +67,9 @@ class FakeConfig:
         self.status_release = threading.Event()
         if not block_status:
             self.status_release.set()
+
+        self.connections = []
+        self.failure_feed = queue.Queue()
 
     @property
     def override(self):
@@ -138,6 +143,19 @@ class FakeConfig:
     def controller_state(self):
         return "ready"
 
+    def live_connections(self):
+        return list(self.connections)
+
+    def failure_stream(self, stop=None):
+        while stop is None or not stop.is_set():
+            try:
+                item = self.failure_feed.get(timeout=0.05)
+            except queue.Empty:
+                continue
+            if item is None:
+                return
+            yield item
+
     def dns(self, domain):
         return "203.0.113.7", "ok"
 
@@ -172,10 +190,15 @@ class Harness(LanlockApp):
         self.apply_done = threading.Event()
         self.verify_done = threading.Event()
         self.status_done = threading.Event()
+        self.failure_seen = threading.Event()
 
     def log_write(self, msg):
         self.messages.append(msg)
         super().log_write(msg)
+
+    def _failure_arrived(self, failure):
+        super()._failure_arrived(failure)
+        self.failure_seen.set()
 
     def _apply_finished(self, ok, error):
         super()._apply_finished(ok, error)
@@ -488,4 +511,157 @@ def test_dns_configuration_error_is_reported_in_tui(monkeypatch):
             await pilot.press("t")
             assert "dns.fake-ip-range6 must be an IPv6 CIDR" in _log(app)
 
+    asyncio.run(scenario())
+
+
+def test_wildcard_parent_only_offers_a_real_parent():
+    assert wildcard_parent("aaa.bbb.cc", "aaa.bbb.cc") == "bbb.cc"
+    assert wildcard_parent("www.corp.example", "www.corp.example") == "corp.example"
+    assert wildcard_parent("corp.example", "corp.example") is None
+    assert wildcard_parent("*.aaa.bbb.cc", "aaa.bbb.cc") is None
+    assert wildcard_parent("+.aaa.bbb.cc", "aaa.bbb.cc") is None
+    assert wildcard_parent(".aaa.bbb.cc", "aaa.bbb.cc") is None
+
+
+def _two_domains():
+    cfg = FakeConfig()
+    text, _ = cfg.add("other.example", cfg.read())
+    return FakeConfig(text)
+
+
+def test_jk_moves_the_table_but_types_in_the_input():
+    async def scenario():
+        app = Harness(_two_domains())
+        async with app.run_test() as pilot:
+            table = app.query_one(DataTable)
+            table.focus()
+            table.move_cursor(row=0)
+            await pilot.press("j")
+            assert table.cursor_row == 1
+            await pilot.press("k")
+            assert table.cursor_row == 0
+
+            await pilot.press("a")
+            await pilot.press("j")
+            assert app.query_one(Input).value == "j"
+            assert table.cursor_row == 0
+    asyncio.run(scenario())
+
+
+def test_add_asks_for_the_host_or_its_parent():
+    async def scenario():
+        app = Harness(FakeConfig())
+        async with app.run_test() as pilot:
+            await pilot.press("a")
+            await pilot.press(*"aaa.bbb.cc")
+            await pilot.press("enter")
+            assert isinstance(app.screen, ScopeScreen)
+            assert app.screen.domain == "aaa.bbb.cc"
+            assert app.screen.parent_domain == "bbb.cc"
+
+            # App-level single-key actions stay out of the modal's way.
+            before = app.text
+            await pilot.press("d")
+            assert isinstance(app.screen, ScopeScreen)
+            assert app.text == before
+
+            await pilot.click("#parent")
+            assert "DOMAIN-SUFFIX,bbb.cc,DIRECT" in app.text
+            assert "aaa.bbb.cc" not in app.text
+    asyncio.run(scenario())
+
+
+def test_add_exact_host_from_the_chooser():
+    async def scenario():
+        app = Harness(FakeConfig())
+        async with app.run_test() as pilot:
+            app._request_add("aaa.bbb.cc")
+            await pilot.pause()
+            assert isinstance(app.screen, ScopeScreen)
+            await pilot.click("#exact")
+            assert "DOMAIN-SUFFIX,aaa.bbb.cc,DIRECT" in app.text
+    asyncio.run(scenario())
+
+
+def test_live_screen_lists_failures_and_active_connections():
+    async def scenario():
+        cfg = FakeConfig()
+        cfg.failure_feed.put({"host": "bad.corp.example", "port": 443,
+                              "rule": "DomainSuffix", "payload": "corp.example",
+                              "outbound": "DIRECT", "detail": "dial tcp: timeout"})
+        cfg.connections = [
+            {"metadata": {"host": "corp.example", "destinationPort": "443"},
+             "rule": "DomainSuffix", "rulePayload": "corp.example",
+             "chains": ["DIRECT"]},
+        ]
+        app = Harness(cfg)
+        async with app.run_test() as pilot:
+            await _wait_event(app.failure_seen)
+            await pilot.press("l")
+            for _ in range(100):
+                if isinstance(app.screen, LiveScreen) and len(app.screen._rows) >= 2:
+                    break
+                await asyncio.sleep(0.01)
+            screen = app.screen
+            assert isinstance(screen, LiveScreen)
+            assert screen._rows[0]["state"] == "FAIL"
+            assert screen._rows[0]["host"] == "bad.corp.example"
+            assert screen._rows[1]["state"] == "live"
+            assert screen._rows[1]["host"] == "corp.example"
+
+            await pilot.press("j")
+            assert screen.query_one(DataTable).cursor_row == 1
+            await pilot.press("k")
+            assert screen.query_one(DataTable).cursor_row == 0
+
+            await pilot.press("enter")
+            assert isinstance(app.screen, ScopeScreen)
+            await pilot.click("#exact")
+            assert "DOMAIN-SUFFIX,bad.corp.example,DIRECT" in app.text
+    asyncio.run(scenario())
+
+
+def test_live_screen_refuses_ip_destinations():
+    async def scenario():
+        cfg = FakeConfig()
+        cfg.failure_feed.put({"host": "10.1.2.3", "port": 443,
+                              "rule": "IP-CIDR", "payload": "10.0.0.0/8",
+                              "outbound": "DIRECT", "detail": "dial tcp: timeout"})
+        app = Harness(cfg)
+        async with app.run_test() as pilot:
+            await _wait_event(app.failure_seen)
+            await pilot.press("l")
+            for _ in range(100):
+                if isinstance(app.screen, LiveScreen) and app.screen._rows:
+                    break
+                await asyncio.sleep(0.01)
+            await pilot.press("enter")
+            assert isinstance(app.screen, LiveScreen)
+            assert "cannot add 10.1.2.3" in str(
+                app.screen.query_one("#live-help", Static).render())
+    asyncio.run(scenario())
+
+
+def test_escape_closes_the_live_screen():
+    async def scenario():
+        app = Harness(FakeConfig())
+        async with app.run_test() as pilot:
+            await pilot.press("l")
+            assert isinstance(app.screen, LiveScreen)
+            await pilot.press("escape")
+            assert not isinstance(app.screen, LiveScreen)
+    asyncio.run(scenario())
+
+
+def test_late_failure_after_unmount_is_ignored():
+    async def scenario():
+        app = Harness(FakeConfig())
+        async with app.run_test():
+            pass
+        # The watcher can post while run_test drains a closing app; the old
+        # handler logged through query_one and raised NoMatches.
+        app._failure_seen(FailureSeen({
+            "host": "late.corp.example", "port": 443, "rule": "DomainSuffix",
+            "payload": "corp.example", "outbound": "DIRECT", "detail": "x"}))
+        assert app.failures == []
     asyncio.run(scenario())

@@ -396,6 +396,16 @@ class MihomoConfig:
         from .probe import controller_state
         return controller_state(self.api)
 
+    def live_connections(self):
+        """Return the controller's currently open connections."""
+        from .probe import live_connections
+        return live_connections(self.api)
+
+    def failure_stream(self, stop=None):
+        """Yield failed dials from the controller log stream until ``stop`` is set."""
+        from .probe import watch_failures
+        return watch_failures(self.api, stop=stop)
+
     def apply(self, log=print, domains=None):
         """Ask ClashTUI to regenerate and reload via the Mihomo API, then check DNS."""
         state = self.controller_state()

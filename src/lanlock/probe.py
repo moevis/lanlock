@@ -30,6 +30,9 @@ DIAL_FAILED = re.compile(r"dial (\S+) \(match ([^)]+)\)")
 # The destination token after the connection arrow: host:port, and not a
 # port-prefix of a longer number.
 DESTINATION = re.compile(r"-->\s*([A-Za-z0-9_.-]+):(\d+)(?![\w.:-])")
+# In a failure line the destination follows the arrow too, but the error text
+# after the port is free-form, so no lookahead is needed.
+AFTER_ARROW = re.compile(r"-->\s*([A-Za-z0-9_.-]+):(\d+)")
 
 API_TIMEOUT = 2.0
 CONNECTION_WINDOW = 2.0
@@ -38,6 +41,8 @@ LOG_WINDOW = 3.0
 LOG_STREAM_TIMEOUT = 0.5
 LOG_START_GRACE = 0.05
 LOG_BUFFER_MAX = 65536
+WATCH_TIMEOUT = 1.0
+WATCH_RETRY_DELAY = 0.5
 
 
 def _log_remaining(deadline):
@@ -225,6 +230,92 @@ def _matches_destination(line, domain, port):
     domain, port = domain.lower(), str(port)
     return any(host.lower() == domain and number == port
                for host, number in DESTINATION.findall(line))
+
+
+def parse_failure(payload):
+    """Return the failed dial described by one log payload, or None.
+
+    Only lines that carry a rule decision and an ``error:`` are kept; DNS and
+    other warnings have no destination token to offer as a domain.
+    """
+    if not isinstance(payload, str) or " error:" not in payload:
+        return None
+    decision = _parse_log_line(payload)
+    destination = AFTER_ARROW.search(payload)
+    if decision is None or destination is None:
+        return None
+    rule, rule_payload, outbound = decision
+    return {"host": destination.group(1), "port": int(destination.group(2)),
+            "rule": rule, "payload": rule_payload, "outbound": outbound,
+            "detail": payload}
+
+
+def _watch_once(api, stop):
+    """Yield failures until the stream idles, drops, or ``stop`` is set.
+
+    mihomo sends no response headers until the first log line, so the short
+    socket timeout is also the idle reconnect period; closing and reopening is
+    cheaper for the caller than a blocked read that cannot observe ``stop``.
+    """
+    parts = urllib.parse.urlsplit(api)
+    if parts.scheme not in ("http", "https") or not parts.hostname:
+        raise ValueError("unsupported controller URL")
+    cls = (http.client.HTTPSConnection if parts.scheme == "https"
+           else http.client.HTTPConnection)
+    connection = cls(parts.hostname, parts.port, timeout=WATCH_TIMEOUT)
+    try:
+        connection.request("GET", parts.path.rstrip("/") + "/logs?level=warning",
+                           headers=_auth_headers())
+        sock = connection.sock
+        try:
+            response = connection.getresponse()
+        except TimeoutError:
+            return
+        if response.status != 200:
+            raise OSError(f"controller /logs returned HTTP {response.status}")
+        buffer = b""
+        while stop is None or not stop.is_set():
+            try:
+                sock.settimeout(WATCH_TIMEOUT)
+                chunk = response.read1(4096)
+            except TimeoutError:
+                return
+            except (OSError, http.client.HTTPException):
+                return
+            if not chunk:
+                # A closed stream must back off; a timeout only reconnects.
+                raise OSError("controller closed the log stream")
+            buffer += chunk
+            while b"\n" in buffer:
+                raw, buffer = buffer.split(b"\n", 1)
+                payload = _log_payload(raw)
+                failure = parse_failure(payload) if payload else None
+                if failure is not None:
+                    yield failure
+            if len(buffer) > LOG_BUFFER_MAX:
+                return
+    finally:
+        try:
+            connection.close()
+        except OSError:
+            pass
+
+
+def watch_failures(api=DEFAULT_API, stop=None):
+    """Yield failed dials from the controller's /logs stream until ``stop`` is set.
+
+    The stream is reopened after idle timeouts so a TUI can shut down promptly;
+    a controller that refuses the subscription backs off instead of spinning.
+    """
+    while stop is None or not stop.is_set():
+        try:
+            yield from _watch_once(api, stop)
+        except (OSError, http.client.HTTPException):
+            if stop is not None:
+                if stop.wait(WATCH_RETRY_DELAY):
+                    return
+            else:
+                time.sleep(WATCH_RETRY_DELAY)
 
 
 def _decision(line, domain, port):

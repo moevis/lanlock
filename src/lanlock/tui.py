@@ -1,13 +1,16 @@
 """Textual UI for lanlock."""
 import argparse
+import ipaddress
 import threading
 
 from rich.text import Text
 from textual import on, work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
+from textual.containers import Vertical
 from textual.message import Message
-from textual.widgets import DataTable, Footer, Header, Input, RichLog, Static
+from textual.screen import ModalScreen
+from textual.widgets import Button, DataTable, Footer, Header, Input, RichLog, Static
 
 from .config import DEFAULT_API, DEFAULT_CONFIG_DIR, MihomoConfig, norm
 
@@ -19,6 +22,38 @@ VERDICT_STYLE = {
     "unknown": "dim yellow",
 }
 
+FAILURE_HISTORY = 50
+LIVE_REFRESH = 2.0
+MAX_LIVE_ROWS = 200
+
+
+def _rule_label(rule, payload=""):
+    rule = rule or "?"
+    return f"{rule}/{payload}" if payload else rule
+
+
+def _is_ip(host):
+    try:
+        ipaddress.ip_address(host)
+    except ValueError:
+        return False
+    return True
+
+
+def wildcard_parent(raw, domain):
+    """Return the parent to offer as a wildcard, or None when there is no choice.
+
+    A short name has no meaningful parent (``bbb.cc`` must not offer ``cc``),
+    and an explicit ``*.``, ``+.`` or leading dot already states the scope.
+    """
+    if raw.strip().startswith(("*.", "+.", ".")):
+        return None
+    if domain.count(".") < 2:
+        return None
+    parent = domain.split(".", 1)[1]
+    return parent if "." in parent else None
+
+
 
 class StatusLoaded(Message):
     """Off-thread result of the clashtui/controller status lookup."""
@@ -28,6 +63,211 @@ class StatusLoaded(Message):
         self.request_id = request_id
         self.snapshot = snapshot
         self.error = error
+
+
+class FailureSeen(Message):
+    """One failed dial captured off the controller log stream."""
+
+    def __init__(self, failure) -> None:
+        super().__init__()
+        self.failure = failure
+
+
+class FailureWatchFailed(Message):
+    """The log watcher could not subscribe; failures will not be collected."""
+
+    def __init__(self, error: str) -> None:
+        super().__init__()
+        self.error = error
+
+
+class ConnectionsLoaded(Message):
+    """Off-thread snapshot of the controller's open connections."""
+
+    def __init__(self, rows, error=None) -> None:
+        super().__init__()
+        self.rows = rows
+        self.error = error
+
+
+class ScopeScreen(ModalScreen):
+    """Ask whether to add the typed host or its whole parent subtree."""
+
+    BINDINGS = [Binding("escape", "cancel", "cancel", show=False)]
+
+    CSS = """
+    ScopeScreen { align: center middle; }
+    #scope { width: 72; height: auto; background: $panel; border: thick $primary; padding: 1 2; }
+    #scope Button { width: 100%; margin-top: 1; }
+    """
+
+    def __init__(self, domain: str, parent: str) -> None:
+        super().__init__()
+        self.domain = domain
+        self.parent_domain = parent
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="scope"):
+            yield Static(f"Add [b]{self.domain}[/b] or all of "
+                         f"[b]{self.parent_domain}[/b]?")
+            yield Button(self.domain, id="exact", variant="primary")
+            yield Button(f"*.{self.parent_domain}   (all of {self.parent_domain})",
+                         id="parent")
+            yield Button("cancel", id="cancel")
+            yield Static("[dim]Both entries are DOMAIN-SUFFIX, so hosts below "
+                         "the chosen name are covered too.[/]")
+
+    @on(Button.Pressed)
+    def _pressed(self, event: Button.Pressed) -> None:
+        self.dismiss({"exact": self.domain,
+                      "parent": self.parent_domain}.get(event.button.id))
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+
+class LiveScreen(ModalScreen):
+    """Recent connections plus the failures seen since the app started."""
+
+    BINDINGS = [
+        Binding("escape", "cancel", "close", show=False),
+        Binding("j", "cursor_down", "down", show=False),
+        Binding("k", "cursor_up", "up", show=False),
+    ]
+
+    CSS = """
+    LiveScreen { align: center middle; }
+    #live-box { width: 90%; height: 80%; background: $panel; border: thick $primary; padding: 0 1; }
+    #live-title { height: 1; }
+    #live-table { height: 1fr; }
+    #live-help { height: 1; color: $text-muted; }
+    """
+
+    def __init__(self, load_connections, failures) -> None:
+        super().__init__()
+        self._load = load_connections
+        self._failures = failures
+        self._active = []
+        self._rows = []
+        self._error = None
+        self._help = None
+        self._timer = None
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="live-box"):
+            yield Static("recent connections · failed dials", id="live-title")
+            yield DataTable(id="live-table")
+            yield Static("Enter add · j/k move · Esc close", id="live-help")
+
+    def on_mount(self) -> None:
+        table = self.query_one("#live-table", DataTable)
+        table.cursor_type = "row"
+        table.zebra_stripes = True
+        table.add_columns("state", "host", "port", "rule", "out", "n")
+        table.focus()
+        self._help = self.query_one("#live-help", Static)
+        self._fill()
+        self._timer = self.set_interval(LIVE_REFRESH, self._refresh)
+        self._refresh()
+
+    def on_unmount(self) -> None:
+        if self._timer is not None:
+            self._timer.stop()
+
+    # ---------- data ----------
+    def _refresh(self) -> None:
+        self._load_worker()
+
+    @work(thread=True, exclusive=True, group="live")
+    def _load_worker(self) -> None:
+        try:
+            rows = self._load()
+        except Exception as e:
+            self.post_message(ConnectionsLoaded(None, f"{type(e).__name__}: {e}"))
+            return
+        self.post_message(ConnectionsLoaded(rows, None))
+
+    @on(ConnectionsLoaded)
+    def _loaded(self, event: ConnectionsLoaded) -> None:
+        if not self.is_running:
+            # A worker can deliver after the screen was dismissed.
+            return
+        if event.error is not None:
+            self._error = event.error
+        else:
+            self._active = event.rows or []
+            self._error = None
+        self._fill()
+
+    @staticmethod
+    def _active_rows(connections) -> list:
+        counts = {}
+        for conn in connections:
+            if not isinstance(conn, dict):
+                continue
+            metadata = conn.get("metadata") or {}
+            host = metadata.get("host") or metadata.get("destinationIP") or "?"
+            chains = conn.get("chains") or []
+            key = (host, str(metadata.get("destinationPort") or ""),
+                   _rule_label(conn.get("rule"), conn.get("rulePayload") or ""),
+                   chains[0] if chains else "-")
+            counts[key] = counts.get(key, 0) + 1
+        return [{"state": "live", "host": host, "port": port, "rule": rule,
+                 "out": out, "n": str(count)}
+                for (host, port, rule, out), count
+                in sorted(counts.items())[:MAX_LIVE_ROWS]]
+
+    def _fill(self) -> None:
+        table = self.query_one("#live-table", DataTable)
+        keep = table.cursor_row
+        rows = []
+        for failure in self._failures():
+            rows.append({"state": "FAIL", "host": failure.get("host") or "?",
+                         "port": str(failure.get("port") or ""),
+                         "rule": _rule_label(failure.get("rule"),
+                                             failure.get("payload") or ""),
+                         "out": failure.get("outbound") or "-",
+                         "n": str(failure.get("count", 1))})
+        rows.extend(self._active_rows(self._active))
+        self._rows = rows
+        table.clear(columns=False)
+        for row in rows:
+            style = "bold red" if row["state"] == "FAIL" else "dim"
+            table.add_row(Text(row["state"], style=style), row["host"], row["port"],
+                          row["rule"], row["out"], row["n"])
+        if rows:
+            table.move_cursor(row=min(max(0, keep), len(rows) - 1))
+        self._show_help()
+
+    def _show_help(self, text=None) -> None:
+        if self._help is None:
+            return
+        if text is None:
+            text = "Enter add · j/k move · Esc close"
+            if self._error:
+                text = f"[red]{self._error}[/]"
+        self._help.update(text)
+
+    # ---------- actions ----------
+    @on(DataTable.RowSelected)
+    def _selected(self, event: DataTable.RowSelected) -> None:
+        index = event.cursor_row
+        if not 0 <= index < len(self._rows):
+            return
+        host = self._rows[index]["host"]
+        if host == "?" or _is_ip(host):
+            self._show_help(f"[yellow]cannot add {host}: not a domain[/]")
+            return
+        self.dismiss(host)
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+    def action_cursor_down(self) -> None:
+        self.query_one("#live-table", DataTable).action_cursor_down()
+
+    def action_cursor_up(self) -> None:
+        self.query_one("#live-table", DataTable).action_cursor_up()
 
 
 class LanlockApp(App):
@@ -50,6 +290,9 @@ class LanlockApp(App):
         Binding("w", "apply", "apply"),
         Binding("s", "save", "save"),
         Binding("r", "reload", "reload"),
+        Binding("l", "live", "live"),
+        Binding("j", "cursor_down", "down", show=False),
+        Binding("k", "cursor_up", "up", show=False),
         Binding("escape", "blur_input", "blur", show=False),
         Binding("q", "quit", "quit"),
     ]
@@ -78,6 +321,9 @@ class LanlockApp(App):
         self._status_request = 0
         self._status_running = False
         self._status_line = None
+        # Failed dials, newest first; filled by the log watcher on the UI thread.
+        self.failures = []
+        self._logs_stop = threading.Event()
 
     @property
     def dirty(self) -> bool:
@@ -104,8 +350,12 @@ class LanlockApp(App):
         self.fill_table()
         table.focus()
         self._request_status_refresh()
+        self._watch_logs()
         self.log_write("[dim]a add · d delete · y sync rule/filter · v verify · t dns · "
-                       "w apply · s save · r reload · q quit[/]")
+                       "w apply · s save · r reload · l live · j/k move · q quit[/]")
+
+    def on_unmount(self) -> None:
+        self._logs_stop.set()
 
     # ---------- helpers ----------
     def log_write(self, msg: str) -> None:
@@ -202,6 +452,65 @@ class LanlockApp(App):
             self._status_error = error
         self.refresh_status()
 
+    # ---------- live connections and failures ----------
+    # Own group: the subscription ends only when the app unmounts.
+    @work(thread=True, group="logs")
+    def _watch_logs(self) -> None:
+        try:
+            for failure in self.cfg.failure_stream(self._logs_stop):
+                self.post_message(FailureSeen(failure))
+        except Exception as e:
+            self.post_message(FailureWatchFailed(f"{type(e).__name__}: {e}"))
+
+    @on(FailureSeen)
+    def _failure_seen(self, event: FailureSeen) -> None:
+        if not self.is_running:
+            # A worker can post after Textual tears the widget tree down.
+            return
+        self._failure_arrived(event.failure)
+
+    def _failure_arrived(self, failure) -> None:
+        key = (failure["host"], failure["port"])
+        known = next((f for f in self.failures
+                      if (f["host"], f["port"]) == key), None)
+        if known is not None:
+            known.update(failure)
+            known["count"] = known.get("count", 1) + 1
+            return
+        failure["count"] = 1
+        self.failures.insert(0, failure)
+        del self.failures[FAILURE_HISTORY:]
+        self.log_write(f"[red]failed[/] {failure['host']}:{failure['port']} "
+                       f"{_rule_label(failure['rule'], failure['payload'])} -> "
+                       f"{failure['outbound']} [dim](l to inspect and add)[/]")
+
+    @on(FailureWatchFailed)
+    def _failure_watch_failed(self, event: FailureWatchFailed) -> None:
+        if not self.is_running:
+            return
+        self.log_write(f"[yellow]failure log unavailable:[/] {event.error}")
+
+    def action_live(self) -> None:
+        self.push_screen(LiveScreen(self.cfg.live_connections, self._failure_rows),
+                         self._live_chosen)
+
+    def _failure_rows(self):
+        return [dict(f) for f in self.failures]
+
+    def _live_chosen(self, host) -> None:
+        if host:
+            self._request_add(host)
+
+    def action_cursor_down(self) -> None:
+        self.query_one(DataTable).action_cursor_down()
+
+    def action_cursor_up(self) -> None:
+        self.query_one(DataTable).action_cursor_up()
+
+    def check_action(self, action: str, parameters: tuple):
+        # A modal owns the keys while it is open; only quitting stays global.
+        return len(self.screen_stack) == 1 or action == "quit"
+
     def _invalidate_audit(self) -> None:
         """Drop verdicts and make any in-flight verify result stale."""
         self._state_epoch += 1
@@ -241,7 +550,23 @@ class LanlockApp(App):
         self.query_one(Input).value = ""
         self.query_one(DataTable).focus()
         if raw:
-            self._add_domain(raw)
+            self._request_add(raw)
+
+    def _request_add(self, raw: str) -> None:
+        try:
+            domain = norm(raw)
+        except ValueError as e:
+            self.log_write(f"[red]error:[/] {e}")
+            return
+        parent = wildcard_parent(raw, domain)
+        if parent is None:
+            self._add_domain(domain)
+            return
+        self.push_screen(ScopeScreen(domain, parent), self._scope_chosen)
+
+    def _scope_chosen(self, choice) -> None:
+        if choice:
+            self._add_domain(choice)
 
     def _add_domain(self, raw: str) -> None:
         try:
