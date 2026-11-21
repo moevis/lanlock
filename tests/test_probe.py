@@ -80,7 +80,7 @@ class _Connection:
 class _NoLogs:
     """Stand-in for the /logs subscription when no evidence is expected."""
 
-    def __init__(self, api, domain, port):
+    def __init__(self, api, domain, port, secret=None):
         pass
 
     def evidence(self, deadline=None):
@@ -144,7 +144,7 @@ def test_api_entry_without_chain_falls_through_to_logs(isolated, monkeypatch):
     dns(monkeypatch, "ok")
     calls = []
 
-    def connections(api):
+    def connections(api, secret=None):
         calls.append(api)
         return [
             {"metadata": {"host": DOMAIN, "destinationPort": 443},
@@ -174,7 +174,7 @@ def test_api_entry_without_chain_falls_through_to_logs(isolated, monkeypatch):
 def test_api_entry_with_chain_is_used_and_leak_wins(isolated):
     monkeypatch = isolated
     dns(monkeypatch, "FAKE-IP", "198.18.0.9")
-    monkeypatch.setattr(probe_mod, "live_connections", lambda api: [
+    monkeypatch.setattr(probe_mod, "live_connections", lambda api, secret=None: [
         {"metadata": {"host": DOMAIN, "destinationPort": 443},
          "rule": "MATCH", "rulePayload": "", "chains": ["PROXY"]},
     ])
@@ -227,7 +227,7 @@ def test_log_stream_captures_matching_decision(monkeypatch):
         ndjson(line(DOMAIN, 443, "DIRECT")) + b"\n",
     ])
     connection = _Connection(response)
-    monkeypatch.setattr(probe_mod, "_log_connection", lambda api: connection)
+    monkeypatch.setattr(probe_mod, "_log_connection", lambda api, secret=None: connection)
 
     stream = probe_mod._LogStream(probe_mod.DEFAULT_API, DOMAIN, 443)
     assert stream.evidence(time.monotonic() + 1.0) == (
@@ -237,7 +237,7 @@ def test_log_stream_captures_matching_decision(monkeypatch):
 
 
 def test_log_stream_subscription_failure_is_bounded(monkeypatch):
-    def unavailable(api):
+    def unavailable(api, secret=None):
         raise urllib.error.URLError("down")
 
     monkeypatch.setattr(probe_mod, "_log_connection", unavailable)
@@ -248,7 +248,7 @@ def test_log_stream_subscription_failure_is_bounded(monkeypatch):
 def test_log_stream_rejects_non_200_and_closes(monkeypatch):
     response = _Response(status=302)
     connection = _Connection(response)
-    monkeypatch.setattr(probe_mod, "_log_connection", lambda api: connection)
+    monkeypatch.setattr(probe_mod, "_log_connection", lambda api, secret=None: connection)
 
     stream = probe_mod._LogStream(probe_mod.DEFAULT_API, DOMAIN, 443)
     assert stream.evidence(time.monotonic() + 1.0) is None
@@ -270,7 +270,7 @@ def test_log_stream_body_read_uses_remaining_window(monkeypatch):
 
     response = Body(lines=[ndjson(line(DOMAIN, 443, "DIRECT")) + b"\n"])
     connection = _Connection(response, sock=sock)
-    monkeypatch.setattr(probe_mod, "_log_connection", lambda api: connection)
+    monkeypatch.setattr(probe_mod, "_log_connection", lambda api, secret=None: connection)
 
     stream = probe_mod._LogStream(probe_mod.DEFAULT_API, DOMAIN, 443)
     assert stream.evidence(time.monotonic() + 1.0) == (
@@ -283,7 +283,7 @@ def test_log_stream_body_read_uses_remaining_window(monkeypatch):
 def test_log_stream_exhausted_deadline_does_not_wait_for_headers(monkeypatch):
     response = _Response(lines=[ndjson(line(DOMAIN, 443, "DIRECT")) + b"\n"])
     connection = _Connection(response)
-    monkeypatch.setattr(probe_mod, "_log_connection", lambda api: connection)
+    monkeypatch.setattr(probe_mod, "_log_connection", lambda api, secret=None: connection)
     monkeypatch.setattr(connection, "getresponse",
                         lambda: pytest.fail("deadline already exhausted"))
 
@@ -300,7 +300,7 @@ def test_log_stream_abandons_response_after_read_timeout(monkeypatch):
 
     response = TimedOut()
     connection = _Connection(response)
-    monkeypatch.setattr(probe_mod, "_log_connection", lambda api: connection)
+    monkeypatch.setattr(probe_mod, "_log_connection", lambda api, secret=None: connection)
 
     stream = probe_mod._LogStream(probe_mod.DEFAULT_API, DOMAIN, 443)
     assert stream.evidence(time.monotonic() + 1.0) is None
@@ -397,7 +397,7 @@ def test_probe_subscribes_to_logs_before_dialing(isolated, monkeypatch):
     order = []
 
     class Logs:
-        def __init__(self, api, domain, port):
+        def __init__(self, api, domain, port, secret=None):
             order.append("logs")
 
         def evidence(self, deadline=None):
@@ -440,7 +440,7 @@ def test_no_address_record_skips_controller(isolated, monkeypatch):
 def test_fake_ip_without_evidence_stays_fake_ip(isolated):
     monkeypatch = isolated
     dns(monkeypatch, "FAKE-IP", "198.18.0.9")
-    monkeypatch.setattr(probe_mod, "live_connections", lambda api: [])
+    monkeypatch.setattr(probe_mod, "live_connections", lambda api, secret=None: [])
 
     result = probe_mod.probe(DOMAIN)
     assert set(result) == KEYS
@@ -465,7 +465,7 @@ def test_cli_check_exits_one_for_fake_ip_without_evidence(
         encoding="utf-8")
     generated(cfg, f"rules: []\ndns:\n  {dns_block}\n")
     resolver(monkeypatch, address, family)
-    monkeypatch.setattr(probe_mod, "live_connections", lambda api: [])
+    monkeypatch.setattr(probe_mod, "live_connections", lambda api, secret=None: [])
 
     assert cli.main(["--config-dir", str(core), "check"]) == 1
     out = capsys.readouterr().out
@@ -564,7 +564,7 @@ def test_mihomo_audit_snapshots_configured_ranges(tmp_path, monkeypatch):
 
     calls = []
 
-    def fake_audit(domains, api=None, log=print, *, networks=None):
+    def fake_audit(domains, api=None, log=print, *, networks=None, secret=None):
         calls.append((list(domains), networks))
         return []
 
@@ -580,7 +580,8 @@ def test_mihomo_audit_snapshots_configured_ranges(tmp_path, monkeypatch):
 def test_controller_state_is_ready(monkeypatch):
     seen = {}
 
-    def api_json(path, api=probe_mod.DEFAULT_API, timeout=probe_mod.API_TIMEOUT):
+    def api_json(path, api=probe_mod.DEFAULT_API, timeout=probe_mod.API_TIMEOUT,
+                 secret=None):
         seen.update(path=path, api=api, timeout=timeout)
         return {"meta": True, "version": "1.19.0"}
 
@@ -650,6 +651,17 @@ def test_api_request_uses_bearer_secret_and_no_double_slash(monkeypatch):
     assert opener.seen["timeout"] == 1.25
 
 
+def test_api_request_uses_an_explicit_secret_over_the_environment(monkeypatch):
+    class Opener:
+        def open(self, request, timeout=None):
+            assert request.get_header("Authorization") == "Bearer from-flag"
+            return _Response()
+
+    monkeypatch.setattr(probe_mod, "_opener", lambda: Opener())
+    monkeypatch.setenv("LANLOCK_API_SECRET", "from-env")
+    probe_mod._api_request("/version", secret="from-flag")
+
+
 def test_api_request_without_secret_has_no_authorization(monkeypatch):
     class Opener:
         def open(self, request, timeout=None):
@@ -672,7 +684,8 @@ def test_api_json_parses_response_body(monkeypatch):
 def test_live_connections_uses_shared_json_helper(monkeypatch):
     seen = []
 
-    def api_json(path, api=probe_mod.DEFAULT_API, timeout=probe_mod.API_TIMEOUT):
+    def api_json(path, api=probe_mod.DEFAULT_API, timeout=probe_mod.API_TIMEOUT,
+                 secret=None):
         seen.append((path, api, timeout))
         return {"connections": [{"id": "one"}]}
 

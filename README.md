@@ -111,8 +111,8 @@ override). Reapply the profile or restart the core to load a change. url and
 custom profiles are refused: their rules live in FlClash's database, not the
 profile file. Live connections and rule attribution need FlClash's External
 Controller (Tools → Settings → General → Inbound, with a non-empty
-外部控制器密钥), which binds `127.0.0.1:9090`; point `--api` there and export
-`LANLOCK_API_SECRET`.
+外部控制器密钥), which binds `127.0.0.1:9090`; point `--api` there. The secret is
+read from FlClash's settings, else `--secret`, else `LANLOCK_API_SECRET`.
 
 ## Commands
 
@@ -146,11 +146,9 @@ Useful global options:
 --config-dir PATH    ClashTUI's mihomo directory, or FlClash's data directory
 --api URL            Mihomo controller, default http://127.0.0.1:9090
 --profile NAME       ClashTUI profile, or a FlClash profile name or id
+--secret VALUE       controller secret (default: $LANLOCK_API_SECRET, then FlClash's)
 --resolver SERVERS   FlClash nameserver-policy value, default system://
 ```
 
-If the controller requires authentication, set:
-
-```bash
-export LANLOCK_API_SECRET=...
-```
+If the controller requires a secret that lanlock cannot find, pass `--secret`
+or set `LANLOCK_API_SECRET`.

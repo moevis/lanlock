@@ -521,16 +521,35 @@ def _atomic_write(path, text, mode):
 
 class MihomoConfig:
     def __init__(self, config_dir=None, api=DEFAULT_API, profile=None,
-                 state_dir=None, resolver=DEFAULT_RESOLVER, backend=None):
+                 state_dir=None, resolver=DEFAULT_RESOLVER, backend=None, secret=None):
         self.backend, self.config_dir = resolve(config_dir, backend)
         self.flclash = self.backend == "flclash"
         self.api = api
+        self.secret = self._resolve_secret(secret)
         self.profile_override = profile
         self.state_dir = os.path.expanduser(state_dir or DEFAULT_STATE_DIR)
         if not isinstance(resolver, str) or not resolver.strip():
             raise ValueError("--resolver must name a DNS server, for example system://")
         self.resolver = resolver.strip()
         self._flclash_profile = None
+
+    def _resolve_secret(self, secret):
+        """Controller secret: the flag, then the env var, then FlClash's own.
+
+        FlClash writes the secret it generates into its settings, so a FlClash
+        setup needs neither the flag nor an exported environment variable.
+        """
+        if secret:
+            return secret
+        env = os.environ.get("LANLOCK_API_SECRET")
+        if env:
+            return env
+        if self.flclash:
+            patch = _flclash_prefs().get("patchClashConfig")
+            stored = str(patch.get("secret") or "") if isinstance(patch, dict) else ""
+            if stored:
+                return stored
+        return ""
 
     # ---------- paths ----------
     @property
@@ -899,7 +918,7 @@ class MihomoConfig:
 
     def controller_state(self):
         from .probe import controller_state
-        return controller_state(self.api)
+        return controller_state(self.api, secret=self.secret or None)
 
     def controller_hint(self):
         """Explain why controller data is missing, or "" when it is available."""
@@ -925,12 +944,12 @@ class MihomoConfig:
     def live_connections(self):
         """Return the controller's currently open connections."""
         from .probe import live_connections
-        return live_connections(self.api)
+        return live_connections(self.api, secret=self.secret or None)
 
     def failure_stream(self, stop=None):
         """Yield failed dials from the controller log stream until ``stop`` is set."""
         from .probe import watch_failures
-        return watch_failures(self.api, stop=stop)
+        return watch_failures(self.api, stop=stop, secret=self.secret or None)
 
     @property
     def failure_log(self):
@@ -1058,7 +1077,8 @@ class MihomoConfig:
     def probe(self, domain, port=443):
         from .probe import probe
         return probe(domain, api=self.api, port=port,
-                     networks=self.fake_ip_networks())
+                     networks=self.fake_ip_networks(),
+                     secret=self.secret or None)
 
     def audit(self, log=print, domains=None):
         from .probe import audit
@@ -1067,7 +1087,7 @@ class MihomoConfig:
             log("note: no Mihomo controller, so verdicts come from DNS alone "
                 "(pass --api once FlClash exposes one)")
         return audit(domains, api=self.api, log=log,
-                     networks=self.fake_ip_networks())
+                     networks=self.fake_ip_networks(), secret=self.secret or None)
 
 
 def dns_check(domain, *, networks=None):

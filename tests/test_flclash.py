@@ -3,6 +3,7 @@ import json
 import os
 import plistlib
 import sqlite3
+from importlib import import_module
 from pathlib import Path
 
 import pytest
@@ -10,6 +11,8 @@ from ruamel.yaml import YAML
 
 from lanlock import MihomoConfig, cli
 from lanlock import config as config_mod
+
+probe_mod = import_module("lanlock.probe")
 
 PROFILE = """mixed-port: 7890
 rules:
@@ -310,6 +313,28 @@ def test_add_matches_the_profile_sequence_indent(cfg):
     assert changed
     assert "  - name: a\n    type: ss\n" in updated
     assert "rules:\n  - DOMAIN-SUFFIX,corp.example,DIRECT\n  - MATCH,PROXY\n" in updated
+
+
+def test_secret_falls_back_to_the_one_flclash_stored(cfg, macos_home, monkeypatch):
+    monkeypatch.delenv("LANLOCK_API_SECRET", raising=False)
+    assert MihomoConfig(cfg.config_dir).secret == ""
+    _prefs(macos_home, profile_id=1, secret="from-prefs")
+    assert MihomoConfig(cfg.config_dir).secret == "from-prefs"
+    monkeypatch.setenv("LANLOCK_API_SECRET", "from-env")
+    assert MihomoConfig(cfg.config_dir).secret == "from-env"
+    assert MihomoConfig(cfg.config_dir, secret="from-flag").secret == "from-flag"
+
+
+def test_controller_calls_carry_the_secret(cfg, monkeypatch):
+    seen = {}
+
+    def fake_state(api=probe_mod.DEFAULT_API, timeout=1.0, secret=None):
+        seen.update(api=api, secret=secret)
+        return "ready"
+
+    monkeypatch.setattr(probe_mod, "controller_state", fake_state)
+    assert MihomoConfig(cfg.config_dir, secret="s3cret").controller_state() == "ready"
+    assert seen["secret"] == "s3cret"
 
 
 def test_controller_hint_names_what_flclash_is_missing(cfg, macos_home, monkeypatch):

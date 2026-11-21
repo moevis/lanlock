@@ -60,26 +60,27 @@ def _opener():
                                        _NoRedirect())
 
 
-def _auth_headers():
-    secret = os.environ.get("LANLOCK_API_SECRET")
-    return {"Authorization": f"Bearer {secret}"} if secret else {}
+def _auth_headers(secret=None):
+    """Bearer header for the controller: the explicit secret, else the env var."""
+    token = secret or os.environ.get("LANLOCK_API_SECRET")
+    return {"Authorization": f"Bearer {token}"} if token else {}
 
 
-def _api_request(path, api=DEFAULT_API, timeout=API_TIMEOUT):
+def _api_request(path, api=DEFAULT_API, timeout=API_TIMEOUT, secret=None):
     url = api.rstrip("/") + path
-    request = urllib.request.Request(url, headers=_auth_headers(), method="GET")
+    request = urllib.request.Request(url, headers=_auth_headers(secret), method="GET")
     return _opener().open(request, timeout=timeout)
 
 
-def _api_json(path, api=DEFAULT_API, timeout=API_TIMEOUT):
-    with _api_request(path, api, timeout) as response:
+def _api_json(path, api=DEFAULT_API, timeout=API_TIMEOUT, secret=None):
+    with _api_request(path, api, timeout, secret) as response:
         return json.load(response)
 
 
-def controller_state(api=DEFAULT_API, timeout=1.0):
+def controller_state(api=DEFAULT_API, timeout=1.0, secret=None):
     """Return ``ready``, ``unauthorized`` or ``unavailable`` for the controller."""
     try:
-        info = _api_json("/version", api, timeout)
+        info = _api_json("/version", api, timeout, secret)
     except urllib.error.HTTPError as exc:
         return "unauthorized" if exc.code in (401, 403) else "unavailable"
     except (OSError, http.client.HTTPException, ValueError):
@@ -92,9 +93,9 @@ def controller_state(api=DEFAULT_API, timeout=1.0):
     return "unavailable"
 
 
-def live_connections(api=DEFAULT_API):
+def live_connections(api=DEFAULT_API, secret=None):
     try:
-        body = _api_json("/connections", api, API_TIMEOUT)
+        body = _api_json("/connections", api, API_TIMEOUT, secret)
     except (OSError, http.client.HTTPException, ValueError):
         return []
     connections = body.get("connections") if isinstance(body, dict) else None
@@ -111,7 +112,7 @@ def _log_payload(raw):
     return payload if isinstance(payload, str) else ""
 
 
-def _log_connection(api):
+def _log_connection(api, secret=None):
     """Send the /logs subscription request; its body is read after the dial."""
     parts = urllib.parse.urlsplit(api)
     if parts.scheme not in ("http", "https") or not parts.hostname:
@@ -121,7 +122,7 @@ def _log_connection(api):
     connection = cls(parts.hostname, parts.port, timeout=LOG_STREAM_TIMEOUT)
     try:
         path = parts.path.rstrip("/") + "/logs?level=info"
-        connection.request("GET", path, headers=_auth_headers())
+        connection.request("GET", path, headers=_auth_headers(secret))
     except (OSError, http.client.HTTPException, ValueError):
         connection.close()
         raise
@@ -136,12 +137,12 @@ class _LogStream:
     up front and the response is collected only after the connection attempt.
     """
 
-    def __init__(self, api, domain, port):
+    def __init__(self, api, domain, port, secret=None):
         self._domain = domain
         self._port = port
         self._connection = None
         try:
-            self._connection = _log_connection(api)
+            self._connection = _log_connection(api, secret)
         except (OSError, http.client.HTTPException, ValueError):
             self.close()
 
@@ -249,7 +250,7 @@ def parse_failure(payload):
             "detail": payload}
 
 
-def _watch_once(api, stop):
+def _watch_once(api, stop, secret=None):
     """Yield failures until the stream idles, drops, or ``stop`` is set.
 
     mihomo sends no response headers until the first log line, so the short
@@ -304,7 +305,7 @@ def _watch_once(api, stop):
             pass
 
 
-def watch_failures(api=DEFAULT_API, stop=None):
+def watch_failures(api=DEFAULT_API, stop=None, secret=None):
     """Yield failed dials from the controller's /logs stream until ``stop`` is set.
 
     The stream is reopened after idle timeouts so a TUI can shut down promptly;
@@ -312,7 +313,7 @@ def watch_failures(api=DEFAULT_API, stop=None):
     """
     while stop is None or not stop.is_set():
         try:
-            yield from _watch_once(api, stop)
+            yield from _watch_once(api, stop, secret)
         except (OSError, http.client.HTTPException):
             if stop is not None:
                 if stop.wait(WATCH_RETRY_DELAY):
@@ -328,13 +329,13 @@ def _decision(line, domain, port):
     return _parse_log_line(line)
 
 
-def _api_evidence(domain, port, api=DEFAULT_API):
+def _api_evidence(domain, port, api=DEFAULT_API, secret=None):
     """Return (rule, payload, outbound) from /connections, or None.
 
     An entry whose outbound chain is missing or empty is not evidence: it must
     fall through to the log stream instead of being reported as a LEAK.
     """
-    for conn in live_connections(api):
+    for conn in live_connections(api, secret):
         md = conn.get("metadata") or {}
         if md.get("host") != domain or str(md.get("destinationPort")) != str(port):
             continue
@@ -356,13 +357,13 @@ def _result(domain, dns_state, ip, rule, payload, outbound):
             "detail": detail, "rule": rule, "outbound": outbound}
 
 
-def probe(domain, api=DEFAULT_API, port=443, *, networks=None):
+def probe(domain, api=DEFAULT_API, port=443, *, networks=None, secret=None):
     """Open one connection and report the newest observed rule decision for it."""
     ip, dns_state = dns_check(domain, networks=networks)
     if dns_state == "no-record":
         return {"domain": domain, "dns": dns_state, "ip": ip, "verdict": "skip",
                 "detail": "no address record", "rule": "-", "outbound": "-"}
-    logs = _LogStream(api, domain, port)
+    logs = _LogStream(api, domain, port, secret)
     sock = None
     try:
         # Let the controller register the already-sent /logs subscription.
@@ -373,7 +374,7 @@ def probe(domain, api=DEFAULT_API, port=443, *, networks=None):
             pass
         deadline = time.monotonic() + CONNECTION_WINDOW
         while time.monotonic() < deadline:
-            evidence = _api_evidence(domain, port, api)
+            evidence = _api_evidence(domain, port, api, secret)
             if evidence:
                 return _result(domain, dns_state, ip, *evidence)
             time.sleep(CONNECTION_POLL)
@@ -392,11 +393,12 @@ def probe(domain, api=DEFAULT_API, port=443, *, networks=None):
             "detail": "no rule decision observed", "rule": "-", "outbound": "-"}
 
 
-def audit(domains, api=DEFAULT_API, log=print, *, networks=None):
+def audit(domains, api=DEFAULT_API, log=print, *, networks=None, secret=None):
     """Probe every domain in parallel; log one line each and a summary."""
     workers = min(8, max(1, len(domains)))
     with ThreadPoolExecutor(max_workers=workers) as pool:
-        results = list(pool.map(lambda d: probe(d, api, networks=networks), domains))
+        results = list(pool.map(
+            lambda d: probe(d, api, networks=networks, secret=secret), domains))
     for r in results:
         log("  %-36s %-8s dns=%-9s %s" % (r["domain"], r["verdict"], r["dns"], r["detail"]))
     leaks = [r for r in results if r["verdict"] == "LEAK"]

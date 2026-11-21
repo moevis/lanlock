@@ -8,7 +8,8 @@ from .config import DEFAULT_API, DEFAULT_RESOLVER, MihomoConfig, norm
 
 def _cfg(args):
     return MihomoConfig(config_dir=args.config_dir, api=args.api, profile=args.profile,
-                        resolver=args.resolver, backend=args.backend)
+                        resolver=args.resolver, backend=args.backend,
+                        secret=args.secret)
 
 
 def build_parser():
@@ -25,6 +26,9 @@ def build_parser():
     p.add_argument("--profile", default=None,
                    help="clashtui profile name, or a FlClash profile name or id "
                         "(auto-detected)")
+    p.add_argument("--secret", default=None,
+                   help="controller secret (default: $LANLOCK_API_SECRET, then "
+                        "FlClash's stored 外部控制器密钥)")
     p.add_argument("--resolver", default=DEFAULT_RESOLVER,
                    help="resolvers written to dns.nameserver-policy for each domain in "
                         "a FlClash profile (default: %(default)s); a configured "
@@ -93,6 +97,7 @@ def _run(args, cfg):
         print(f"rules: {cfg.rule_count(text)} in {cfg.override}")
         print("backend:", f"{cfg.backend} ({cfg.config_dir})")
         print("profile:", cfg.active_profile() or "?")
+        print("controller:", cfg.controller_state())
         return 0
 
     if args.cmd == "check":

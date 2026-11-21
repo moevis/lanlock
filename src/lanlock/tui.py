@@ -894,6 +894,9 @@ def main(argv=None):
     p.add_argument("--profile", default=None,
                    help="clashtui profile name, or a FlClash profile name or id "
                         "(auto-detected)")
+    p.add_argument("--secret", default=None,
+                   help="controller secret (default: $LANLOCK_API_SECRET, then "
+                        "FlClash's stored 外部控制器密钥)")
     p.add_argument("--resolver", default=DEFAULT_RESOLVER,
                    help="resolvers written to dns.nameserver-policy for each domain in "
                         "a FlClash profile (default: %(default)s); a configured "
@@ -902,7 +905,7 @@ def main(argv=None):
     a = p.parse_args(argv)
     try:
         cfg = MihomoConfig(config_dir=a.config_dir, api=a.api, profile=a.profile,
-                           resolver=a.resolver, backend=a.backend)
+                           resolver=a.resolver, backend=a.backend, secret=a.secret)
     except (OSError, ValueError) as e:
         print(f"error: {e}", file=sys.stderr)
         return 2
