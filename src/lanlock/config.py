@@ -104,6 +104,11 @@ def _flclash_dir():
     return None
 
 
+def _clean(path):
+    """Return an absolute path with one separator style and no trailing slash."""
+    return os.path.normpath(os.path.expanduser(path))
+
+
 def _clashtui_ready(directory):
     return os.path.isfile(os.path.join(os.path.expanduser(directory), _OVERRIDE_FILE))
 
@@ -119,7 +124,7 @@ def resolve(config_dir=None, backend=None):
         raise ValueError(f"unknown backend {backend!r}; expected one of "
                          f"{', '.join(_BACKENDS)}")
     if config_dir is not None:
-        directory = os.path.expanduser(config_dir)
+        directory = _clean(config_dir)
         if backend is not None:
             return backend, directory
         markers = [name for name, ready in
@@ -133,10 +138,10 @@ def resolve(config_dir=None, backend=None):
     clashtui = _clashtui_dir()
     found = []
     if backend in (None, "clashtui") and _clashtui_ready(clashtui):
-        found.append(("clashtui", os.path.expanduser(clashtui)))
+        found.append(("clashtui", _clean(clashtui)))
     flclash = _flclash_dir() if backend in (None, "flclash") else None
     if flclash is not None:
-        found.append(("flclash", os.path.expanduser(flclash)))
+        found.append(("flclash", _clean(flclash)))
     if len(found) > 1:
         raise ValueError(
             "found both a ClashTUI override and a FlClash configuration:\n  "
@@ -146,11 +151,11 @@ def resolve(config_dir=None, backend=None):
         return found[0]
     if backend == "flclash":
         directory = flclash or next(iter(_flclash_candidates()))
-        raise ValueError(f"no FlClash configuration at {os.path.expanduser(directory)}: "
+        raise ValueError(f"no FlClash configuration at {_clean(directory)}: "
                          "database.sqlite not found")
     raise ValueError(
         "ClashTUI Mihomo override missing. Start ClashTUI to initialize it, pass "
-        f"--config-dir pointing to its mihomo directory ({os.path.expanduser(clashtui)}), "
+        f"--config-dir pointing to its mihomo directory ({_clean(clashtui)}), "
         "or use --backend flclash")
 
 
