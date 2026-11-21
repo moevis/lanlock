@@ -1,4 +1,4 @@
-"""Command line interface: lanlock [options] <command> ..."""
+"""Command line interface: mihomo-internal [options] <command> ..."""
 import argparse
 import sys
 
@@ -11,7 +11,7 @@ def _cfg(args):
 
 
 def build_parser():
-    p = argparse.ArgumentParser(prog="lanlock",
+    p = argparse.ArgumentParser(prog="mihomo-internal",
                                 description="keep internal domains on DIRECT in mihomo")
     p.add_argument("--config-dir", default=DEFAULT_CONFIG_DIR)
     p.add_argument("--api", default=DEFAULT_API,

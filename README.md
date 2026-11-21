@@ -2,7 +2,7 @@
 
 Keep selected internal domains on `DIRECT` in a ClashTUI-managed Mihomo setup.
 
-For each domain, lanlock keeps these two entries in sync:
+For each domain, mihomo-internal keeps these two entries in sync:
 
 - a `DOMAIN-SUFFIX,...,DIRECT` rule
 - a `+.domain` entry in `dns.fake-ip-filter`
@@ -18,6 +18,8 @@ Python 3.10 or newer is required.
 python -m pip install .
 ```
 
+This installs the `mihomo-internal` and `mihomo-tui` commands.
+
 Install the terminal UI extra when needed:
 
 ```bash
@@ -30,11 +32,11 @@ Use an existing ClashTUI Mihomo profile. Mihomo must be running with its
 controller enabled. Applying changes also requires the `clashtui` command on
 `PATH`.
 
-By default, lanlock uses the `mihomo` directory under the platform config
+By default, mihomo-internal uses the `mihomo` directory under the platform config
 directory. Override it with `--config-dir`:
 
 ```bash
-lanlock --config-dir ~/.config/clashtui/mihomo ls
+mihomo-internal --config-dir ~/.config/clashtui/mihomo ls
 ```
 
 The override file is `core_override_config.yaml` in that directory. When
@@ -45,23 +47,23 @@ override, so copy them from the active profile first if they are missing.
 ## Commands
 
 ```bash
-lanlock ls
-lanlock add corp.example
-lanlock rm corp.example
-lanlock sync
-lanlock check
-lanlock tui
+mihomo-internal ls
+mihomo-internal add corp.example
+mihomo-internal rm corp.example
+mihomo-internal sync
+mihomo-internal check
+mihomo-internal tui
 ```
 
 `add`, `rm`, and `sync` save the override, keep one `.bak` backup, and apply
 the change through ClashTUI. Use `--no-apply` to edit the file only:
 
 ```bash
-lanlock add --no-apply corp.example
-lanlock sync --no-apply
+mihomo-internal add --no-apply corp.example
+mihomo-internal sync --no-apply
 ```
 
-`lanlock tui` and `lanlock-tui` are equivalent. The TUI requires the `tui`
+`mihomo-internal tui` and `mihomo-tui` are equivalent. The TUI requires the `tui`
 extra.
 
 Useful global options:

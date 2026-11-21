@@ -12,7 +12,7 @@ Quick start::
     for row in cfg.audit(log=print):     # check DNS and observed routing decisions
         print(row["domain"], row["verdict"])
 
-Everything is also available as a CLI (``lanlock``) and a Textual UI (``lanlock-tui``).
+Everything is also available as a CLI (``mihomo-internal``) and a Textual UI (``mihomo-tui``).
 """
 from .config import MihomoConfig, dns_check, norm
 from .probe import audit, probe

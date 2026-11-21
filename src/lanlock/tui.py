@@ -31,7 +31,7 @@ class StatusLoaded(Message):
 
 
 class LanlockApp(App):
-    TITLE = "lanlock"
+    TITLE = "mihomo-internal"
     SUB_TITLE = "internal domains stay DIRECT"
 
     CSS = """
@@ -473,7 +473,7 @@ def run(cfg=None):
 
 
 def main(argv=None):
-    p = argparse.ArgumentParser(prog="lanlock-tui")
+    p = argparse.ArgumentParser(prog="mihomo-tui")
     p.add_argument("--config-dir", default=DEFAULT_CONFIG_DIR)
     p.add_argument("--api", default=DEFAULT_API,
                    help="Mihomo controller URL (default: %(default)s)")
