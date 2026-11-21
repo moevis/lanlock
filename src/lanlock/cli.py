@@ -90,6 +90,7 @@ def _run(args, cfg):
         for row in cfg.rows(text):
             print(f"{row['domain']:40s} rule={'y' if row['rule'] else '-'} "
                   f"filter={'y' if row['filter'] else '-'}")
+        print(f"rules: {cfg.rule_count(text)} in {cfg.override}")
         print("backend:", f"{cfg.backend} ({cfg.config_dir})")
         print("profile:", cfg.active_profile() or "?")
         return 0

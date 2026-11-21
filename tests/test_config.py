@@ -178,6 +178,13 @@ def test_rejects_unsafe_edits(cfg, text, message):
         cfg.add("corp.example", text)
 
 
+def test_rule_count_counts_every_rule_not_just_managed_ones(cfg):
+    assert cfg.rule_count() == 3
+    text, _ = cfg.add("corp.example")
+    assert cfg.rule_count(text) == 4
+    assert cfg.rule_count("dns: {}\n") == 0
+
+
 def test_save_keeps_last_good_backup_and_mode(cfg):
     path = Path(cfg.override)
     backup = path.with_suffix(".yaml.bak")

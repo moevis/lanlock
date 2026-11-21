@@ -30,6 +30,12 @@ dns:
     - 1.1.1.1
 """
 
+EMPTY_TEXT = """\
+rules:
+  - GEOSITE,private,DIRECT
+  - MATCH,PROXY
+"""
+
 _RULE_RE = re.compile(r"^\s*-\s+DOMAIN-SUFFIX,([^,]+),DIRECT", re.M)
 _FILTER_RE = re.compile(r"^\s*-\s+'\+\.([^']+)'", re.M)
 
@@ -47,6 +53,7 @@ class FakeConfig:
         self.add_error = None
 
         self.flclash = False
+        self.state = "ready"
         self.apply_result = apply_result
         self.apply_error = None
         self.apply_calls = 0
@@ -92,6 +99,9 @@ class FakeConfig:
         filt = set(_FILTER_RE.findall(text))
         return [{"domain": d, "rule": d in rules, "filter": d in filt}
                 for d in sorted(rules | filt)]
+
+    def rule_count(self, text=None):
+        return 3
 
     def save(self, text, expect=None):
         if self.save_error is not None:
@@ -145,7 +155,10 @@ class FakeConfig:
         return f"fake-profile-{self.status_calls}"
 
     def controller_state(self):
-        return "ready"
+        return self.state
+
+    def controller_hint(self):
+        return "" if self.state == "ready" else "no controller for the live view"
 
     def live_connections(self):
         return list(self.connections)
@@ -324,6 +337,19 @@ def test_status_requests_coalesce_without_stale_overwrite():
             status = str(app.query_one("#status", Static).render())
             assert "profile: fake-profile-2" in status
             assert "fake-profile-1" not in status
+    asyncio.run(scenario())
+
+
+def test_empty_table_says_why_and_how_many_rules_loaded():
+    async def scenario():
+        app = Harness(FakeConfig(EMPTY_TEXT))
+        async with app.run_test():
+            await _wait_event(app.status_done)
+            log = _log(app)
+            assert "no managed domains" in log
+            assert "3 rules loaded" in log
+            status = str(app.query_one("#status", Static).render())
+            assert "rules: 3" in status
     asyncio.run(scenario())
 
 
@@ -604,6 +630,24 @@ def test_add_exact_host_from_the_chooser():
             assert isinstance(app.screen, ScopeScreen)
             await pilot.click("#exact")
             assert "DOMAIN-SUFFIX,aaa.bbb.cc,DIRECT" in app.text
+    asyncio.run(scenario())
+
+
+def test_live_screen_explains_an_empty_panel_when_there_is_no_controller():
+    async def scenario():
+        cfg = FakeConfig()
+        cfg.state = "unavailable"
+        cfg.connections = []
+        app = Harness(cfg)
+        async with app.run_test() as pilot:
+            await pilot.press("l")
+            for _ in range(100):
+                if isinstance(app.screen, LiveScreen) and app.screen._help is not None:
+                    break
+                await asyncio.sleep(0.01)
+            help_text = str(app.screen.query_one("#live-help", Static).render())
+            assert "no controller for the live view" in help_text
+            assert "no live controller" in _log(app)
     asyncio.run(scenario())
 
 

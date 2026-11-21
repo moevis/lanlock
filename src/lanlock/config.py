@@ -781,6 +781,10 @@ class MihomoConfig:
     def rows(self, text=None):
         return self._override(text).rows()
 
+    def rule_count(self, text=None):
+        """Return how many rules the edited file carries (managed or not)."""
+        return len(self._override(text).rules)
+
     def _override(self, text=None):
         if self.flclash:
             seed_filters, seed_mode = self._flclash_seed()
@@ -896,6 +900,25 @@ class MihomoConfig:
     def controller_state(self):
         from .probe import controller_state
         return controller_state(self.api)
+
+    def controller_hint(self):
+        """Explain why controller data is missing, or "" when it is available."""
+        state = self.controller_state()
+        if state == "ready":
+            return ""
+        if state == "unauthorized":
+            return ("the controller needs its secret: export LANLOCK_API_SECRET=<secret> "
+                    f"for {self.api}")
+        if self.flclash:
+            patch = _flclash_prefs().get("patchClashConfig")
+            secret = str((patch or {}).get("secret") or "") if isinstance(patch, dict) else ""
+            if not secret:
+                return ("FlClash runs no controller while 外部控制器密钥 is empty: "
+                        "Settings → General → Inbound → 外部控制器 (External Controller), "
+                        "then use --api http://127.0.0.1:9090 (that port must be free)")
+            return ("FlClash has an External Controller secret: start the core and run with "
+                    "--api http://127.0.0.1:9090 plus LANLOCK_API_SECRET=<secret>")
+        return f"no mihomo controller at {self.api}; start one or pass --api"
 
     def live_connections(self):
         """Return the controller's currently open connections."""

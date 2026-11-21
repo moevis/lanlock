@@ -109,7 +109,9 @@ With FlClash, lanlock edits the selected local profile in
 `~/Library/Application Support/com.follow.clash` (`$LANLOCK_FLCLASH_DIR` to
 override). Reapply the profile or restart the core to load a change. url and
 custom profiles are refused: their rules live in FlClash's database, not the
-profile file.
+profile file. Live connections and rule attribution need FlClash's External
+Controller (a non-empty 外部控制器密钥), which binds `127.0.0.1:9090`; point
+`--api` there and export `LANLOCK_API_SECRET`.
 
 ## Commands
 

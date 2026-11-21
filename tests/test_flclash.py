@@ -46,15 +46,20 @@ def _database(root, rows, added_rules=()):
                        'VALUES (?, ?, ?, ?)', added_rules)
 
 
-def _prefs(home, profile_id=None, dns=None):
+def _prefs(home, profile_id=None, dns=None, secret=None):
     """Write FlClash's own settings; ``dns`` is its app-level patch DNS."""
     preferences = home / "Library" / "Preferences"
     preferences.mkdir(parents=True, exist_ok=True)
     settings = {}
     if profile_id is not None:
         settings["currentProfileId"] = profile_id
+    patch = {}
     if dns is not None:
-        settings["patchClashConfig"] = {"dns": dns}
+        patch["dns"] = dns
+    if secret is not None:
+        patch["secret"] = secret
+    if patch:
+        settings["patchClashConfig"] = patch
     with open(preferences / "com.follow.clash.plist", "wb") as f:
         plistlib.dump({"flutter.config": json.dumps(settings)}, f)
 
@@ -305,6 +310,20 @@ def test_add_matches_the_profile_sequence_indent(cfg):
     assert changed
     assert "  - name: a\n    type: ss\n" in updated
     assert "rules:\n  - DOMAIN-SUFFIX,corp.example,DIRECT\n  - MATCH,PROXY\n" in updated
+
+
+def test_controller_hint_names_what_flclash_is_missing(cfg, macos_home, monkeypatch):
+    monkeypatch.setattr(MihomoConfig, "controller_state", lambda self: "unavailable")
+    assert "外部控制器密钥" in cfg.controller_hint()
+
+    _prefs(macos_home, profile_id=1, secret="s3cret")
+    assert "LANLOCK_API_SECRET" in cfg.controller_hint()
+
+    monkeypatch.setattr(MihomoConfig, "controller_state", lambda self: "unauthorized")
+    assert "LANLOCK_API_SECRET" in cfg.controller_hint()
+
+    monkeypatch.setattr(MihomoConfig, "controller_state", lambda self: "ready")
+    assert cfg.controller_hint() == ""
 
 
 def test_resolver_must_not_be_blank(cfg):

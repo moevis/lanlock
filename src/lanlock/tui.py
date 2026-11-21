@@ -130,7 +130,11 @@ class ScopeScreen(ModalScreen):
 
 
 class LiveScreen(ModalScreen):
-    """Open connections plus recorded failures, with a state filter."""
+    """Open connections plus recorded failures, with a state filter.
+
+    Opening connections come from the mihomo controller, so a controller-less
+    backend shows only recorded failures; ``controller_hint`` explains that.
+    """
 
     BINDINGS = [
         Binding("escape", "cancel", "close", show=False),
@@ -150,10 +154,11 @@ class LiveScreen(ModalScreen):
     FILTERS = ("all", "fail", "live")
     FILTER_LABEL = {"all": "all", "fail": "failed only", "live": "open only"}
 
-    def __init__(self, load_connections, failures) -> None:
+    def __init__(self, load_connections, failures, controller_hint=None) -> None:
         super().__init__()
         self._load = load_connections
         self._failures = failures
+        self._hint = controller_hint or (lambda: "")
         self._active = []
         self._rows = []
         self._filter = "all"
@@ -259,6 +264,11 @@ class LiveScreen(ModalScreen):
                     f"{self.FILTER_LABEL[self._filter]} · Esc close")
             if self._error:
                 text = f"[red]{self._error}[/]"
+            elif not self._active:
+                # An empty panel otherwise reads as "no traffic", not "no data".
+                hint = self._hint()
+                if hint:
+                    text = f"[yellow]{hint}[/]"
         self._help.update(text)
 
     def action_cycle_filter(self) -> None:
@@ -320,6 +330,7 @@ class LanlockApp(App):
         self.cfg = cfg or MihomoConfig()
         self.text = self.cfg.read()
         self.rows = self.cfg.rows(self.text)
+        self.rules_total = None
         self.audit = {}
         # UI-thread state: the buffer, the last text known to be on disk, and
         # the snapshot of the one in-flight apply (None when idle).
@@ -369,6 +380,9 @@ class LanlockApp(App):
         table.add_columns("domain", "direct rule", "fake-ip-filter", "live")
         self.fill_table()
         table.focus()
+        if not self.rows:
+            self.log_write(f"[dim]no managed domains in {self.cfg.override} yet "
+                           f"({self.rules_total} rules loaded); press a to add one[/]")
         self._load_history()
         self._request_status_refresh()
         self._watch_logs()
@@ -406,9 +420,10 @@ class LanlockApp(App):
         unsynced = sum(1 for r in self.rows if r["rule"] != r["filter"])
         synced = f"   unsynced: [yellow]{unsynced}[/]" if unsynced else ""
         failed = "   status: [yellow]lookup failed[/]" if self._status_error else ""
+        rules = f"   rules: {self.rules_total}" if self.rules_total is not None else ""
         self._status_line.update(
             f"profile: {prof}   controller: {controller}   "
-            f"file: {self.cfg.override}   {state}{verified}{synced}{failed}")
+            f"file: {self.cfg.override}   {state}{rules}{verified}{synced}{failed}")
 
     def _request_status_refresh(self) -> None:
         """Queue a fresh external-status lookup, coalescing pending ones."""
@@ -543,8 +558,11 @@ class LanlockApp(App):
         self.log_write(f"[yellow]failure log unavailable:[/] {event.error}")
 
     def action_live(self) -> None:
-        self.push_screen(LiveScreen(self.cfg.live_connections, self._failure_rows),
-                         self._live_chosen)
+        hint = self.cfg.controller_hint
+        if self.cfg.controller_state() != "ready":
+            self.log_write(f"[yellow]no live controller:[/] {hint()}")
+        self.push_screen(LiveScreen(self.cfg.live_connections, self._failure_rows,
+                                    controller_hint=hint), self._live_chosen)
 
     def _failure_rows(self):
         return [dict(f) for f in self.failures]
@@ -575,6 +593,10 @@ class LanlockApp(App):
         return Text(v[0], style=VERDICT_STYLE.get(v[0], ""))
 
     def fill_table(self) -> None:
+        try:
+            self.rules_total = self.cfg.rule_count(self.text)
+        except (OSError, ValueError):
+            self.rules_total = None
         table = self.query_one(DataTable)
         keep = table.cursor_row
         table.clear(columns=False)
