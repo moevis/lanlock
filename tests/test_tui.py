@@ -13,6 +13,7 @@ import pytest
 pytest.importorskip("textual")
 
 
+from lanlock import cli  # noqa: E402
 from lanlock.tui import (FailureSeen, LanlockApp, LiveScreen, ScopeScreen,  # noqa: E402
                          main as tui_main, wildcard_parent)
 from textual.widgets import DataTable, Input, Static  # noqa: E402
@@ -766,3 +767,26 @@ def test_tui_version_flag(capsys):
         tui_main(["--version"])
     assert exc.value.code == 0
     assert capsys.readouterr().out.startswith("mihomo-tui ")
+
+
+@pytest.mark.parametrize("entrypoint, subcommand", [
+    (cli.tui_main, False),
+    (cli.main, True),
+], ids=["tui_main", "cli_main_tui"])
+def test_tui_startup_reports_missing_override(entrypoint, subcommand, tmp_path, capsys):
+    missing = tmp_path / "missing" / "mihomo"
+    assert not missing.exists()
+    argv = ["--config-dir", str(missing)] + (["tui"] if subcommand else [])
+
+    assert entrypoint(argv) == 2
+
+    captured = capsys.readouterr()
+    override = missing / "core_override_config.yaml"
+    assert captured.out == ""
+    assert captured.err.startswith("error: ")
+    assert str(override) in captured.err
+    assert "--config-dir" in captured.err
+    assert "Traceback" not in captured.err
+    assert not missing.exists()
+    assert not override.exists()
+    assert not (missing / "config" / "config.yaml").exists()

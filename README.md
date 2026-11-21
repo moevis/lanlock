@@ -50,7 +50,7 @@ All forms install the `mihomo-internal` and `mihomo-tui` commands; drop
 ## Update
 
 ```bash
-uv tool install --force "lanlock[tui] @ git+https://github.com/moevis/lanlock.git"
+uv tool install --force --refresh "lanlock[tui] @ git+https://github.com/moevis/lanlock.git"
 # or
 pipx install --force "lanlock[tui] @ git+https://github.com/moevis/lanlock.git"
 ```
@@ -65,9 +65,9 @@ cd lanlock && git pull
 .venv/bin/pip install -e ".[tui]"   # non-editable: --force-reinstall ".[tui]"
 ```
 
-`--force`/`--force-reinstall` matters while the version stays 0.1.0: without
-it pip sees the installed version as already satisfying the requirement.
-Check what is installed:
+For uv, `--refresh` checks GitHub for the latest commit and `--force`
+reinstalls the tool even if the package version is unchanged.
+Check the installed version with
 
 ```bash
 mihomo-internal --version
@@ -79,15 +79,20 @@ Use an existing ClashTUI Mihomo profile. Mihomo must be running with its
 controller enabled. Applying changes also requires the `clashtui` command on
 `PATH`.
 
-By default, mihomo-internal uses the `mihomo` directory under the platform config
-directory. Override it with `--config-dir`:
+On macOS, the default is `~/.config/clashtui/mihomo`, with a fallback to
+`$XDG_CONFIG_HOME/clashtui/mihomo` if only that directory has an override.
+For a portable ClashTUI install, lanlock uses `data/mihomo` next to the
+ClashTUI executable.
+
+For a custom setup, pass ClashTUI’s `mihomo` subdirectory, which contains
+`core_override_config.yaml`.
 
 ```bash
-mihomo-internal --config-dir ~/.config/clashtui/mihomo ls
+mihomo-tui --config-dir "/path/to/clashtui/mihomo"
 ```
 
-The override file is `core_override_config.yaml` in that directory. When
-adding domains, the override must contain the profile's `rules` and `dns`
+If the override file is missing, start ClashTUI once with the Mihomo core.
+When adding domains, the override must contain the profile's `rules` and `dns`
 sections. ClashTUI replaces these top-level sections when it merges the
 override, so copy them from the active profile first if they are missing.
 

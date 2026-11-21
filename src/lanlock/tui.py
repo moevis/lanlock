@@ -1,6 +1,7 @@
 """Textual UI for lanlock."""
 import argparse
 import ipaddress
+import sys
 import threading
 import time
 
@@ -845,7 +846,12 @@ class LanlockApp(App):
 
 
 def run(cfg=None):
-    LanlockApp(cfg).run()
+    try:
+        app = LanlockApp(cfg)
+    except (OSError, ValueError) as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 2
+    app.run()
 
 
 def main(argv=None):
@@ -856,4 +862,4 @@ def main(argv=None):
                    help="Mihomo controller URL (default: %(default)s)")
     p.add_argument("--profile", default=None, help="clashtui profile (auto-detected)")
     a = p.parse_args(argv)
-    run(MihomoConfig(config_dir=a.config_dir, api=a.api, profile=a.profile))
+    return run(MihomoConfig(config_dir=a.config_dir, api=a.api, profile=a.profile))

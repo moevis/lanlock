@@ -35,6 +35,83 @@ def cfg(tmp_path):
     return config
 
 
+OVERRIDE_FILE = "core_override_config.yaml"
+
+
+def _install_override(directory, text):
+    directory.mkdir(parents=True)
+    (directory / OVERRIDE_FILE).write_text(text, encoding="utf-8")
+    return directory
+
+
+@pytest.fixture
+def macos_home(tmp_path, monkeypatch):
+    """Simulate macOS with a private home and no real executable lookup."""
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setattr(config_mod.sys, "platform", "darwin")
+    monkeypatch.setattr(config_mod.shutil, "which", lambda name: None)
+    monkeypatch.setattr(
+        config_mod.os.path, "expanduser",
+        lambda path: os.fspath(home) + path[1:] if path.startswith("~") else path,
+    )
+    return home
+
+
+def test_macos_reads_override_from_xdg_install_when_native_missing(macos_home, tmp_path, monkeypatch):
+    (macos_home / ".config" / "clashtui" / "mihomo").mkdir(parents=True)
+    xdg = tmp_path / "xdg"
+    _install_override(xdg / "clashtui" / "mihomo", "xdg override\n")
+    monkeypatch.setenv("XDG_CONFIG_HOME", os.fspath(xdg))
+
+    resolved = config_mod._default_config_dir()
+    assert resolved == os.path.join(os.fspath(xdg), "clashtui", "mihomo")
+    assert MihomoConfig(resolved).read() == "xdg override\n"
+
+
+def test_macos_prefers_native_override_over_xdg_install(macos_home, tmp_path, monkeypatch):
+    _install_override(macos_home / ".config" / "clashtui" / "mihomo", "native override\n")
+    xdg = tmp_path / "xdg"
+    _install_override(xdg / "clashtui" / "mihomo", "xdg override\n")
+    monkeypatch.setenv("XDG_CONFIG_HOME", os.fspath(xdg))
+
+    resolved = config_mod._default_config_dir()
+    assert resolved == os.path.join("~/.config", "clashtui", "mihomo")
+    assert MihomoConfig(resolved).read() == "native override\n"
+
+
+def test_portable_layout_beside_real_executable_selects_override(tmp_path, monkeypatch):
+    binary = tmp_path / "bin" / "clashtui"
+    binary.parent.mkdir()
+    binary.write_text("", encoding="utf-8")
+    _install_override(binary.parent / "data" / "mihomo", "portable override\n")
+    monkeypatch.setattr(config_mod.shutil, "which",
+                        lambda name: os.fspath(binary) if name == "clashtui" else None)
+
+    resolved = config_mod._default_config_dir()
+    assert resolved == os.path.join(os.fspath(binary.parent), "data", "mihomo")
+    assert MihomoConfig(resolved).read() == "portable override\n"
+
+
+def test_portable_layout_follows_symlinked_executable(tmp_path, monkeypatch):
+    installed = tmp_path / "opt" / "clashtui"
+    installed.mkdir(parents=True)
+    target = installed / "clashtui"
+    target.write_text("", encoding="utf-8")
+    _install_override(installed / "data" / "mihomo", "portable symlink override\n")
+    link = tmp_path / "bin" / "clashtui"
+    link.parent.mkdir()
+    try:
+        link.symlink_to(target)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks unavailable")
+    monkeypatch.setattr(config_mod.shutil, "which", lambda name: os.fspath(link))
+
+    resolved = config_mod._default_config_dir()
+    assert resolved == os.path.join(os.fspath(installed), "data", "mihomo")
+    assert MihomoConfig(resolved).read() == "portable symlink override\n"
+
+
 def test_add_edits_only_target_sections_and_preserves_precedence(cfg):
     text, changed = cfg.add("*.Corp.Example.")
     assert changed

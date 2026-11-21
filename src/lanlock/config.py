@@ -7,6 +7,7 @@ import ipaddress
 import json
 import os
 import re
+import shutil
 import socket
 import subprocess
 import sys
@@ -21,14 +22,33 @@ from ruamel.yaml.comments import CommentedMap, CommentedSeq
 from ruamel.yaml.error import YAMLError
 from ruamel.yaml.scalarstring import SingleQuotedScalarString
 
+_OVERRIDE_FILE = "core_override_config.yaml"
+
+
 def _default_config_dir():
+    binary = shutil.which("clashtui")
+    if binary:
+        portable = os.path.join(os.path.dirname(os.path.realpath(binary)), "data")
+        if os.path.isdir(portable):
+            return os.path.join(portable, "mihomo")
+
     if sys.platform == "win32":
         directory = os.environ.get("APPDATA") or "~/AppData/Roaming"
     elif sys.platform == "linux":
         directory = os.environ.get("XDG_CONFIG_HOME") or "~/.config"
     else:
         directory = "~/.config"
-    return os.path.join(directory, "clashtui", "mihomo")
+    config_dir = os.path.join(directory, "clashtui", "mihomo")
+    # The macOS installer honors XDG_CONFIG_HOME even though ClashTUI itself
+    # defaults to ~/.config. Use the installer layout if only it has an override.
+    if sys.platform == "darwin" and not os.path.isfile(
+            os.path.join(os.path.expanduser(config_dir), _OVERRIDE_FILE)):
+        xdg = os.environ.get("XDG_CONFIG_HOME")
+        if xdg:
+            installed = os.path.join(xdg, "clashtui", "mihomo")
+            if os.path.isfile(os.path.join(installed, _OVERRIDE_FILE)):
+                return installed
+    return config_dir
 
 
 def _default_state_dir():
@@ -269,7 +289,7 @@ class MihomoConfig:
     # ---------- paths ----------
     @property
     def override(self):
-        return os.path.join(self.config_dir, "core_override_config.yaml")
+        return os.path.join(self.config_dir, _OVERRIDE_FILE)
 
     @property
     def generated(self):
@@ -320,8 +340,18 @@ class MihomoConfig:
     # ---------- yaml ----------
     def read(self, path=None):
         """Return the file as ``\\n``-separated text, whatever its line endings."""
-        with open(path or self.override, encoding="utf-8") as f:
-            return f.read()
+        try:
+            with open(self.override if path is None else path, encoding="utf-8") as f:
+                return f.read()
+        except FileNotFoundError as e:
+            if path is not None:
+                raise
+            raise FileNotFoundError(
+                e.errno,
+                "ClashTUI Mihomo override missing. Start ClashTUI to initialize it "
+                "or pass --config-dir pointing to its mihomo directory",
+                e.filename,
+            ) from None
 
     def save(self, text):
         """Validate first, then replace the override atomically and keep one backup.
