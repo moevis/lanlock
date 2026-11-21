@@ -781,7 +781,7 @@ def test_tui_version_flag(capsys):
     with pytest.raises(SystemExit) as exc:
         tui_main(["--version"])
     assert exc.value.code == 0
-    assert capsys.readouterr().out.startswith("mihomo-tui ")
+    assert capsys.readouterr().out.startswith("lanlock-tui ")
 
 
 @pytest.mark.parametrize("entrypoint, subcommand", [

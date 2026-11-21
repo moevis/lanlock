@@ -3,7 +3,7 @@
 Keep selected internal domains on `DIRECT` in a ClashTUI- or FlClash-managed
 Mihomo setup.
 
-For each domain, mihomo-internal keeps these entries in sync:
+For each domain, lanlock keeps these entries in sync:
 
 - a `DOMAIN-SUFFIX,...,DIRECT` rule
 - a `+.domain` entry in `dns.fake-ip-filter`
@@ -46,8 +46,9 @@ python -m venv .venv
 .venv/bin/pip install -e ".[tui]"
 ```
 
-All forms install the `mihomo-internal` and `mihomo-tui` commands; drop
-`[tui]` to skip the terminal UI.
+All forms install the `lanlock` and `lanlock-tui` commands (`mihomo-internal`
+and `mihomo-tui` stay available as aliases); drop `[tui]` to skip the terminal
+UI.
 
 ## Update
 
@@ -72,12 +73,12 @@ reinstalls the tool even if the package version is unchanged.
 Check the installed version with
 
 ```bash
-mihomo-internal --version
+lanlock --version
 ```
 
 ## Before You Start
 
-Two setups are supported: ClashTUI and FlClash. `mihomo-internal ls` prints
+Two setups are supported: ClashTUI and FlClash. `lanlock ls` prints
 which one was resolved; when both are installed, pass
 `--backend clashtui|flclash` (or `--config-dir`).
 
@@ -94,7 +95,7 @@ For a custom setup, pass ClashTUI’s `mihomo` subdirectory, which contains
 `core_override_config.yaml`.
 
 ```bash
-mihomo-tui --config-dir "/path/to/clashtui/mihomo"
+lanlock-tui --config-dir "/path/to/clashtui/mihomo"
 ```
 
 If the override file is missing, start ClashTUI once with the Mihomo core.
@@ -111,12 +112,12 @@ profile file.
 ## Commands
 
 ```bash
-mihomo-internal ls
-mihomo-internal add corp.example
-mihomo-internal rm corp.example
-mihomo-internal sync
-mihomo-internal check
-mihomo-internal tui
+lanlock ls
+lanlock add corp.example
+lanlock rm corp.example
+lanlock sync
+lanlock check
+lanlock tui
 ```
 
 `add`, `rm`, and `sync` save the file, keep one `.bak` backup, and apply the
@@ -124,11 +125,11 @@ change through ClashTUI; with FlClash they print the reload step instead. Use
 `--no-apply` to edit the file only:
 
 ```bash
-mihomo-internal add --no-apply corp.example
-mihomo-internal sync --no-apply
+lanlock add --no-apply corp.example
+lanlock sync --no-apply
 ```
 
-`mihomo-internal tui` and `mihomo-tui` are equivalent. The TUI requires the `tui`
+`lanlock tui` and `lanlock-tui` are equivalent. The TUI requires the `tui`
 extra. `check` reports what the controller saw; without one (a plain FlClash
 setup, for example) it reports DNS answers only.
 

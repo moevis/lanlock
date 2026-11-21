@@ -289,7 +289,7 @@ class LiveScreen(ModalScreen):
 
 
 class LanlockApp(App):
-    TITLE = "mihomo-internal"
+    TITLE = "lanlock"
     SUB_TITLE = "internal domains stay DIRECT"
 
     CSS = """
@@ -860,7 +860,7 @@ def run(cfg=None):
 
 
 def main(argv=None):
-    p = argparse.ArgumentParser(prog="mihomo-tui")
+    p = argparse.ArgumentParser(prog="lanlock-tui")
     p.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     p.add_argument("--config-dir", default=None,
                    help="ClashTUI mihomo directory, or the FlClash data directory "

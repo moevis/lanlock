@@ -20,6 +20,9 @@ tui = ["textual>=0.80"]
 test = ["pytest>=8"]
 
 [project.scripts]
+lanlock = "lanlock.cli:main"
+lanlock-tui = "lanlock.cli:tui_main"
+# Kept so existing installs and notes keep working; drop when that usage is gone.
 mihomo-internal = "lanlock.cli:main"
 mihomo-tui = "lanlock.cli:tui_main"
 
