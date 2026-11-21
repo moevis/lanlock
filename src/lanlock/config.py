@@ -913,10 +913,12 @@ class MihomoConfig:
             patch = _flclash_prefs().get("patchClashConfig")
             secret = str((patch or {}).get("secret") or "") if isinstance(patch, dict) else ""
             if not secret:
-                return ("FlClash runs no controller while 外部控制器密钥 is empty: "
-                        "Settings → General → Inbound → 外部控制器 (External Controller), "
-                        "then use --api http://127.0.0.1:9090 (that port must be free)")
-            return ("FlClash has an External Controller secret: start the core and run with "
+                return ("FlClash runs no controller while 外部控制器密钥 is empty: Tools → "
+                        "Settings → General → Inbound → External Controller (外部控制器). "
+                        "It binds 127.0.0.1:9090, so free that port and toggle the switch "
+                        "off and on, then use --api http://127.0.0.1:9090")
+            return ("FlClash has an External Controller secret: start the core, toggle the "
+                    "switch off/on if 9090 was occupied, and run with "
                     "--api http://127.0.0.1:9090 plus LANLOCK_API_SECRET=<secret>")
         return f"no mihomo controller at {self.api}; start one or pass --api"
 
