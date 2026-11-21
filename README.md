@@ -12,54 +12,65 @@ Mihomo actually used.
 
 ## Install
 
-Python 3.10 or newer is required.
+Python 3.10 or newer is required. Install into an isolated environment:
+distribution Pythons reject a system-wide `pip install` with
+`externally-managed-environment`.
 
-Install straight from GitHub:
-
-```bash
-python -m pip install "lanlock @ git+https://github.com/moevis/lanlock.git"
-```
-
-Install the terminal UI extra when needed:
+With [uv](https://docs.astral.sh/uv/):
 
 ```bash
-python -m pip install "lanlock[tui] @ git+https://github.com/moevis/lanlock.git"
+uv tool install "lanlock[tui] @ git+https://github.com/moevis/lanlock.git"
 ```
 
-Or install from a local clone (add `-e` to keep it editable):
+Or with pipx:
+
+```bash
+pipx install "lanlock[tui] @ git+https://github.com/moevis/lanlock.git"
+```
+
+Or into a virtual environment:
+
+```bash
+python -m venv ~/.venvs/lanlock
+~/.venvs/lanlock/bin/pip install "lanlock[tui] @ git+https://github.com/moevis/lanlock.git"
+```
+
+From a local clone (editable):
 
 ```bash
 git clone https://github.com/moevis/lanlock.git
 cd lanlock
-python -m pip install ".[tui]"
+python -m venv .venv
+.venv/bin/pip install -e ".[tui]"
 ```
 
-All forms install the `mihomo-internal` and `mihomo-tui` commands.
+All forms install the `mihomo-internal` and `mihomo-tui` commands; drop
+`[tui]` to skip the terminal UI.
 
 ## Update
 
-From a local clone:
-
 ```bash
-cd lanlock
-git pull
-python -m pip install --force-reinstall ".[tui]"   # -e ".[tui]" when editable
+uv tool install --force "lanlock[tui] @ git+https://github.com/moevis/lanlock.git"
+# or
+pipx install --force "lanlock[tui] @ git+https://github.com/moevis/lanlock.git"
 ```
 
-From the GitHub URL, keeping the extra you installed:
+Virtual environment or local clone:
 
 ```bash
-python -m pip install --upgrade --force-reinstall \
+~/.venvs/lanlock/bin/pip install --upgrade --force-reinstall \
   "lanlock[tui] @ git+https://github.com/moevis/lanlock.git"
+
+cd lanlock && git pull
+.venv/bin/pip install -e ".[tui]"   # non-editable: --force-reinstall ".[tui]"
 ```
 
-`--force-reinstall` matters while the version stays 0.1.0: without it pip sees
-the installed version as already satisfying the requirement. Check what is
-installed:
+`--force`/`--force-reinstall` matters while the version stays 0.1.0: without
+it pip sees the installed version as already satisfying the requirement.
+Check what is installed:
 
 ```bash
 mihomo-internal --version
-mihomo-tui --version
 ```
 
 ## Before You Start
