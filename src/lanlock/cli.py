@@ -2,6 +2,7 @@
 import argparse
 import sys
 
+from . import __version__
 from .config import DEFAULT_API, DEFAULT_CONFIG_DIR, MihomoConfig, norm
 
 
@@ -13,6 +14,7 @@ def _cfg(args):
 def build_parser():
     p = argparse.ArgumentParser(prog="mihomo-internal",
                                 description="keep internal domains on DIRECT in mihomo")
+    p.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     p.add_argument("--config-dir", default=DEFAULT_CONFIG_DIR)
     p.add_argument("--api", default=DEFAULT_API,
                    help="Mihomo controller URL (default: %(default)s)")

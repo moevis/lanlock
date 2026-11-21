@@ -9,7 +9,7 @@ import sys
 import pytest
 from ruamel.yaml import YAML
 
-from lanlock import MihomoConfig, cli
+from lanlock import MihomoConfig, __version__, cli
 from lanlock import config as config_mod
 
 
@@ -277,3 +277,10 @@ def test_failure_history_caps_entries_and_detail(tmp_path):
     cfg.record_failure({"host": "long.example", "port": 443, "rule": "r",
                         "payload": "", "outbound": "DIRECT", "detail": "x" * 5000})
     assert len(cfg.failure_history()[0]["detail"]) == 2000
+
+
+def test_version_flag(capsys):
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["--version"])
+    assert exc.value.code == 0
+    assert capsys.readouterr().out.strip() == f"mihomo-internal {__version__}"

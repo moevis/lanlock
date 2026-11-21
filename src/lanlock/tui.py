@@ -13,6 +13,7 @@ from textual.message import Message
 from textual.screen import ModalScreen
 from textual.widgets import Button, DataTable, Footer, Header, Input, RichLog, Static
 
+from . import __version__
 from .config import DEFAULT_API, DEFAULT_CONFIG_DIR, MihomoConfig, norm
 
 VERDICT_STYLE = {
@@ -849,6 +850,7 @@ def run(cfg=None):
 
 def main(argv=None):
     p = argparse.ArgumentParser(prog="mihomo-tui")
+    p.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     p.add_argument("--config-dir", default=DEFAULT_CONFIG_DIR)
     p.add_argument("--api", default=DEFAULT_API,
                    help="Mihomo controller URL (default: %(default)s)")

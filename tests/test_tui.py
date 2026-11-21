@@ -14,7 +14,7 @@ pytest.importorskip("textual")
 
 
 from lanlock.tui import (FailureSeen, LanlockApp, LiveScreen, ScopeScreen,  # noqa: E402
-                         wildcard_parent)
+                         main as tui_main, wildcard_parent)
 from textual.widgets import DataTable, Input, Static  # noqa: E402
 
 BASE_TEXT = """\
@@ -759,3 +759,10 @@ def test_loaded_history_is_refreshed_once_per_session():
             assert app.failures[0]["detail"] == "newer"
             assert len(cfg.recorded) == 1
     asyncio.run(scenario())
+
+
+def test_tui_version_flag(capsys):
+    with pytest.raises(SystemExit) as exc:
+        tui_main(["--version"])
+    assert exc.value.code == 0
+    assert capsys.readouterr().out.startswith("mihomo-tui ")
