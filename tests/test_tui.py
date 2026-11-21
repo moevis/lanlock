@@ -224,6 +224,18 @@ def test_status_reports_controller_readiness():
     asyncio.run(scenario())
 
 
+def test_late_status_completion_after_unmount_is_ignored():
+    async def scenario():
+        app = Harness(FakeConfig())
+        async with app.run_test():
+            await _wait_event(app.status_done)
+        # The status worker can land while run_test tears the app down; the
+        # old render path then queried an already-detached Static and raised.
+        app._status_finished(app._status_request, ("late", True), None)
+        assert app._profile == "fake-profile-1"
+    asyncio.run(scenario())
+
+
 def test_status_lookup_blocked_keeps_ui_and_editor_live():
     async def scenario():
         cfg = FakeConfig(block_status=True)

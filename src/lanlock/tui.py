@@ -77,6 +77,7 @@ class LanlockApp(App):
         self._status_lock = threading.Lock()
         self._status_request = 0
         self._status_running = False
+        self._status_line = None
 
     @property
     def dirty(self) -> bool:
@@ -96,6 +97,7 @@ class LanlockApp(App):
 
     def on_mount(self) -> None:
         table = self.query_one(DataTable)
+        self._status_line = self.query_one("#status", Static)
         table.cursor_type = "row"
         table.zebra_stripes = True
         table.add_columns("domain", "direct rule", "fake-ip-filter", "live")
@@ -111,6 +113,9 @@ class LanlockApp(App):
 
     def refresh_status(self) -> None:
         """Render the current editor and cached external status immediately."""
+        if self._status_line is None or not self.is_running:
+            # A status worker can finish while the app shuts down; nothing to paint.
+            return
         if self._profile is None and self._status_pending:
             prof = "[dim]pending…[/]"
         else:
@@ -130,7 +135,7 @@ class LanlockApp(App):
         unsynced = sum(1 for r in self.rows if r["rule"] != r["filter"])
         synced = f"   unsynced: [yellow]{unsynced}[/]" if unsynced else ""
         failed = "   status: [yellow]lookup failed[/]" if self._status_error else ""
-        self.query_one(Static).update(
+        self._status_line.update(
             f"profile: {prof}   controller: {controller}   "
             f"file: {self.cfg.override}   {state}{verified}{synced}{failed}")
 
@@ -178,6 +183,9 @@ class LanlockApp(App):
         self._status_finished(event.request_id, event.snapshot, event.error)
 
     def _status_finished(self, request_id: int, snapshot, error) -> None:
+        if not self.is_running:
+            # Shutting down: do not retry lookups or paint a closed app.
+            return
         with self._status_lock:
             latest = self._status_request
             self._status_running = False
