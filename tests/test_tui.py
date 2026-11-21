@@ -1,0 +1,479 @@
+"""Regression tests for the TUI's in-flight apply/audit state boundaries.
+
+Textual is an optional dependency: without it the whole module is skipped.
+Every config operation is a fake; nothing touches the real controller or network.
+"""
+import asyncio
+import re
+import threading
+
+import pytest
+
+pytest.importorskip("textual")
+
+
+from lanlock.tui import LanlockApp  # noqa: E402
+from textual.widgets import Static  # noqa: E402
+
+BASE_TEXT = """\
+rules:
+  - DOMAIN-SUFFIX,corp.example,DIRECT
+  - IP-CIDR,127.0.0.0/8,DIRECT
+  - MATCH,PROXY
+dns:
+  fake-ip-filter:
+    - '+.corp.example'
+  default-nameserver:
+    - 1.1.1.1
+"""
+
+_RULE_RE = re.compile(r"^\s*-\s+DOMAIN-SUFFIX,([^,]+),DIRECT", re.M)
+_FILTER_RE = re.compile(r"^\s*-\s+'\+\.([^']+)'", re.M)
+
+
+class FakeConfig:
+    """Stands in for MihomoConfig; gates apply/audit to provoke races."""
+
+    def __init__(self, text=BASE_TEXT, *, apply_result=True,
+                 block_apply=False, block_audit=False, block_status=False):
+        self._text = text
+        self.saves = []
+        self.save_error = None
+        self.read_error = None
+        self.rows_error = None
+        self.add_error = None
+
+        self.apply_result = apply_result
+        self.apply_error = None
+        self.apply_calls = 0
+        self.apply_domains = []
+        self.apply_started = threading.Event()
+        self.apply_release = threading.Event()
+        if not block_apply:
+            self.apply_release.set()
+
+        self.audit_error = None
+        self.audit_calls = 0
+        self.audit_domains = []
+        self.audit_started = threading.Event()
+        self.audit_release = threading.Event()
+        if not block_audit:
+            self.audit_release.set()
+
+        self.status_calls = 0
+        self.status_started = threading.Event()
+        self.status_release = threading.Event()
+        if not block_status:
+            self.status_release.set()
+
+    @property
+    def override(self):
+        return "/tmp/lanlock-test/core_override_config.yaml"
+
+    def read(self, path=None):
+        if self.read_error is not None:
+            raise self.read_error
+        return self._text
+
+    def rows(self, text=None):
+        if self.rows_error is not None:
+            raise self.rows_error
+        text = self._text if text is None else text
+        rules = set(_RULE_RE.findall(text))
+        filt = set(_FILTER_RE.findall(text))
+        return [{"domain": d, "rule": d in rules, "filter": d in filt}
+                for d in sorted(rules | filt)]
+
+    def save(self, text):
+        if self.save_error is not None:
+            raise self.save_error
+        self.saves.append(text)
+        self._text = text
+
+    def add(self, domain, text=None):
+        if self.add_error is not None:
+            raise self.add_error
+        text = self._text if text is None else text
+        changed = False
+        if f"DOMAIN-SUFFIX,{domain},DIRECT" not in text:
+            anchor = "  - IP-CIDR,127.0.0.0/8,DIRECT"
+            text = text.replace(
+                anchor, f"  - DOMAIN-SUFFIX,{domain},DIRECT\n{anchor}", 1)
+            changed = True
+        marker = "    - '+." + domain + "'"
+        if marker not in text:
+            text = text.replace(
+                "  default-nameserver:", marker + "\n  default-nameserver:", 1)
+            changed = True
+        return text, changed
+
+    def remove(self, domain, text=None):
+        text = self._text if text is None else text
+        before = text
+        text = re.sub(
+            rf"^\s*-\s+DOMAIN-SUFFIX,{re.escape(domain)},DIRECT\s*\n",
+            "", text, flags=re.M)
+        text = re.sub(rf"^\s*-\s+'\+\.{re.escape(domain)}'\s*\n",
+                      "", text, flags=re.M)
+        return text, text != before
+
+    def sync(self, text=None):
+        text = self._text if text is None else text
+        added = []
+        for row in self.rows(text):
+            if row["rule"] != row["filter"]:
+                text, changed = self.add(row["domain"], text)
+                if changed:
+                    added.append(
+                        (row["domain"], "filter" if row["rule"] else "rule"))
+        return text, added
+
+    def active_profile(self):
+        self.status_calls += 1
+        self.status_started.set()
+        if not self.status_release.wait(5):
+            raise TimeoutError("fake status gate not released")
+        return f"fake-profile-{self.status_calls}"
+
+    def controller_state(self):
+        return "ready"
+
+    def dns(self, domain):
+        return "203.0.113.7", "ok"
+
+    def apply(self, log=print, domains=None):
+        self.apply_calls += 1
+        self.apply_domains.append(list(domains or []))
+        self.apply_started.set()
+        if not self.apply_release.wait(5):
+            raise TimeoutError("fake apply gate not released")
+        if self.apply_error is not None:
+            raise self.apply_error
+        return self.apply_result
+
+    def audit(self, log=print, domains=None):
+        self.audit_calls += 1
+        self.audit_domains.append(list(domains or []))
+        self.audit_started.set()
+        if not self.audit_release.wait(5):
+            raise TimeoutError("fake audit gate not released")
+        if self.audit_error is not None:
+            raise self.audit_error
+        return [{"domain": d, "verdict": "LEAK", "detail": "PROXY"}
+                for d in (domains or [])]
+
+
+class Harness(LanlockApp):
+    """Observes UI-thread completion without depending on RichLog internals."""
+
+    def __init__(self, cfg):
+        super().__init__(cfg)
+        self.messages = []
+        self.apply_done = threading.Event()
+        self.verify_done = threading.Event()
+        self.status_done = threading.Event()
+
+    def log_write(self, msg):
+        self.messages.append(msg)
+        super().log_write(msg)
+
+    def _apply_finished(self, ok, error):
+        super()._apply_finished(ok, error)
+        self.apply_done.set()
+
+    def _apply_save_failed(self, message):
+        super()._apply_save_failed(message)
+        self.apply_done.set()
+
+    def _after_verify(self, results, token):
+        super()._after_verify(results, token)
+        self.verify_done.set()
+
+    def _verify_failed(self, token, message):
+        super()._verify_failed(token, message)
+        self.verify_done.set()
+
+    def _status_finished(self, request_id, snapshot, error):
+        super()._status_finished(request_id, snapshot, error)
+        # Stale completions leave the newest request pending; only a settled
+        # result (success or lookup failure) releases the waiting test.
+        if not self._status_pending:
+            self.status_done.set()
+
+
+def _log(app):
+    return "\n".join(app.messages)
+
+
+async def _wait_event(event):
+    assert await asyncio.to_thread(event.wait, 5), "worker callback never ran"
+
+
+def test_status_reports_controller_readiness():
+    async def scenario():
+        cfg = FakeConfig()
+        app = Harness(cfg)
+        async with app.run_test():
+            # The lookup runs in a worker, so readiness only appears once the
+            # UI thread applies its completion callback.
+            await _wait_event(app.status_done)
+            status = str(app.query_one("#status", Static).render())
+            assert "profile: fake-profile-1" in status
+            assert "controller: ready" in status
+            assert "pending" not in status
+    asyncio.run(scenario())
+
+
+def test_status_lookup_blocked_keeps_ui_and_editor_live():
+    async def scenario():
+        cfg = FakeConfig(block_status=True)
+        app = Harness(cfg)
+        async with app.run_test() as pilot:
+            await _wait_event(cfg.status_started)
+            status = str(app.query_one("#status", Static).render())
+            assert "profile: pending" in status
+            assert "controller: pending" in status
+
+            # Real key input keeps working while the external lookup hangs.
+            await pilot.press("a")
+            await pilot.press(*"new.example")
+            await pilot.press("enter")
+
+            assert app.dirty
+            assert any(r["domain"] == "new.example" for r in app.rows)
+            status = str(app.query_one("#status", Static).render())
+            assert "DIRTY" in status
+            assert "profile: pending" in status
+            assert not app.status_done.is_set()
+
+            cfg.status_release.set()
+            await _wait_event(app.status_done)
+
+            status = str(app.query_one("#status", Static).render())
+            assert "profile: fake-profile-1" in status
+            assert "controller: ready" in status
+            assert "pending" not in status
+            assert app.dirty  # the external result never rewrites the buffer
+    asyncio.run(scenario())
+
+
+def test_status_requests_coalesce_without_stale_overwrite():
+    async def scenario():
+        cfg = FakeConfig(block_status=True)
+        app = Harness(cfg)
+        async with app.run_test():
+            await _wait_event(cfg.status_started)
+            for _ in range(5):
+                app._request_status_refresh()
+
+            # One blocked lookup owns the worker: rapid requests only mark a
+            # newer generation, they do not start more threads.
+            assert cfg.status_calls == 1
+
+            cfg.status_release.set()
+            await _wait_event(app.status_done)
+
+            # Exactly one refetch covers every queued request, and only the
+            # newest snapshot is shown (the older one is discarded).
+            assert cfg.status_calls == 2
+            status = str(app.query_one("#status", Static).render())
+            assert "profile: fake-profile-2" in status
+            assert "fake-profile-1" not in status
+    asyncio.run(scenario())
+
+
+def test_apply_is_single_flight_and_keeps_newer_edits():
+    async def scenario():
+        cfg = FakeConfig(block_apply=True)
+        app = Harness(cfg)
+        async with app.run_test():
+            app._add_domain("first.example")
+            before = app.text
+            app.action_apply()
+            await _wait_event(cfg.apply_started)
+
+            # A second apply while one is slow must not start another worker.
+            app.action_apply()
+            assert cfg.apply_calls == 1
+
+            # Edits during apply are kept, not folded into the saved snapshot.
+            app._add_domain("new.example")
+            assert app.dirty
+            assert "new.example" in app.text
+
+            # Saving and reloading are blocked while the worker owns the file.
+            app.action_save()
+            app.action_reload()
+            assert cfg.saves == [before]
+            assert "new.example" in app.text
+            assert "apply in progress" in _log(app)
+
+            cfg.apply_release.set()
+            await _wait_event(app.apply_done)
+
+            assert not app.applying
+            assert cfg.apply_calls == 1
+            assert cfg.saves == [before]  # exactly one save of the snapshot
+            assert app._saved_text == before
+            assert app.dirty  # the newer edit was never marked clean
+            assert any(r["domain"] == "new.example" for r in app.rows)
+            assert cfg.apply_domains == [["corp.example", "first.example"]]
+    asyncio.run(scenario())
+
+
+def test_apply_invalidates_existing_audit():
+    async def scenario():
+        cfg = FakeConfig()
+        app = Harness(cfg)
+        async with app.run_test():
+            app._after_verify(
+                [{"domain": "corp.example", "verdict": "ok", "detail": "DIRECT"}],
+                app._state_epoch)
+            assert app.audit
+
+            app.action_apply()
+            assert app.audit == {}  # apply may change the live controller
+            await _wait_event(app.apply_done)
+    asyncio.run(scenario())
+
+
+def test_failed_reload_keeps_prior_state():
+    async def scenario():
+        cfg = FakeConfig()
+        app = Harness(cfg)
+        async with app.run_test():
+            app._add_domain("new.example")
+            assert app.dirty
+            text, rows, saved = app.text, list(app.rows), app._saved_text
+
+            cfg.read_error = OSError("override disappeared")
+            app.action_reload()
+            assert (app.text, app.rows, app._saved_text, app.dirty) == \
+                (text, rows, saved, True)
+
+            # Read succeeds but parsing the staged rows fails: the old text
+            # must not have been installed either.
+            cfg.read_error = None
+            cfg._text = "rules:\n  - DOMAIN-SUFFIX,other.example,DIRECT\n"
+            cfg.rows_error = ValueError("unsupported target shape")
+            app.action_reload()
+            assert (app.text, app.rows, app._saved_text, app.dirty) == \
+                (text, rows, saved, True)
+            assert "reload FAILED" in _log(app)
+    asyncio.run(scenario())
+
+
+def test_stale_audit_after_edit_is_discarded():
+    async def scenario():
+        cfg = FakeConfig(block_audit=True)
+        app = Harness(cfg)
+        async with app.run_test():
+            app.action_verify()
+            await _wait_event(cfg.audit_started)
+            app._add_domain("new.example")
+
+            cfg.audit_release.set()
+            await _wait_event(app.verify_done)
+
+            assert app.audit == {}
+            assert "ignored stale verify results" in _log(app)
+            assert cfg.audit_domains == [["corp.example"]]
+    asyncio.run(scenario())
+
+
+def test_stale_audit_after_reload_is_discarded():
+    async def scenario():
+        cfg = FakeConfig(block_audit=True)
+        app = Harness(cfg)
+        async with app.run_test():
+            app.action_verify()
+            await _wait_event(cfg.audit_started)
+            app.action_reload()
+
+            cfg.audit_release.set()
+            await _wait_event(app.verify_done)
+
+            assert app.audit == {}
+            assert "ignored stale verify results" in _log(app)
+    asyncio.run(scenario())
+
+
+def test_apply_failure_reports_that_override_was_saved():
+    async def scenario():
+        cfg = FakeConfig(apply_result=False)
+        app = Harness(cfg)
+        async with app.run_test():
+            app._add_domain("first.example")
+            before = app.text
+            app.action_apply()
+            await _wait_event(app.apply_done)
+
+            assert cfg.saves == [before]
+            assert not app.dirty
+            log = _log(app)
+            assert "apply FAILED" in log
+            assert "override saved" in log
+    asyncio.run(scenario())
+
+
+def test_apply_save_failure_clears_guard_and_keeps_dirty():
+    async def scenario():
+        cfg = FakeConfig()
+        cfg.save_error = ValueError("invalid yaml")
+        app = Harness(cfg)
+        async with app.run_test():
+            app._add_domain("new.example")
+            app.action_apply()
+            await _wait_event(app.apply_done)
+
+            assert not app.applying
+            assert app.dirty
+            assert cfg.apply_calls == 0
+            assert "override not saved" in _log(app)
+    asyncio.run(scenario())
+
+
+def test_clean_save_and_apply_do_not_rewrite_override():
+    async def scenario():
+        cfg = FakeConfig()
+        app = Harness(cfg)
+        async with app.run_test():
+            app.action_save()
+            assert cfg.saves == []  # no .bak/override churn when clean
+
+            app.action_apply()
+            await _wait_event(app.apply_done)
+            assert cfg.saves == []
+            assert cfg.apply_calls == 1
+    asyncio.run(scenario())
+
+
+def test_edit_error_leaves_state_untouched():
+    async def scenario():
+        cfg = FakeConfig()
+        app = Harness(cfg)
+        async with app.run_test():
+            text, rows, saved = app.text, list(app.rows), app._saved_text
+            cfg.add_error = ValueError("unsupported target shape")
+            app._add_domain("new.example")
+
+            assert (app.text, app.rows, app._saved_text) == (text, rows, saved)
+            assert not app.dirty
+            assert "unsupported target shape" in _log(app)
+    asyncio.run(scenario())
+
+
+def test_dns_configuration_error_is_reported_in_tui(monkeypatch):
+    async def scenario():
+        cfg = FakeConfig()
+
+        def dns(domain):
+            raise ValueError("dns.fake-ip-range6 must be an IPv6 CIDR")
+
+        monkeypatch.setattr(cfg, "dns", dns)
+        app = Harness(cfg)
+        async with app.run_test() as pilot:
+            await pilot.press("t")
+            assert "dns.fake-ip-range6 must be an IPv6 CIDR" in _log(app)
+
+    asyncio.run(scenario())
