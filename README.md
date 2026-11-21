@@ -82,8 +82,9 @@ so ended successful connections cannot be replayed. Failed dials are captured
 while the TUI runs and recorded in `failures.json` under the state directory
 (`$XDG_STATE_HOME/mihomo-internal`, `~/Library/Application
 Support/mihomo-internal`, or `%LOCALAPPDATA%\mihomo-internal`), keeping the
-newest 200 across restarts. `f` filters the panel: all → failed only → open
-only. Select a row and press Enter to add that host (or its parent).
+newest 200 per controller URL across restarts. `f` filters the panel: all →
+failed only → open only. Select a row and press Enter to add that host (or its
+parent).
 
 Useful global options:
 

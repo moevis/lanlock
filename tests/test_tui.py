@@ -731,3 +731,31 @@ def test_repeat_failure_keeps_first_seen_time_and_count():
             assert app.failures[0]["time"] == first
             assert len(cfg.recorded) == 1
     asyncio.run(scenario())
+
+
+def test_loaded_history_is_refreshed_once_per_session():
+    async def scenario():
+        cfg = FakeConfig()
+        cfg.history = [{"host": "bad.corp.example", "port": 443,
+                        "rule": "DomainSuffix", "payload": "corp.example",
+                        "outbound": "DIRECT", "detail": "old",
+                        "time": "2026-11-20 09:00:00"}]
+        app = Harness(cfg)
+        async with app.run_test():
+            assert len(app.failures) == 1 and app.failures[0]["count"] == 1
+
+            app._failure_arrived({"host": "bad.corp.example", "port": 443,
+                                  "rule": "DomainSuffix", "payload": "corp.example",
+                                  "outbound": "DIRECT", "detail": "new"})
+            entry = app.failures[0]
+            assert entry["count"] == 2
+            assert entry["detail"] == "new"
+            assert entry["time"] != "2026-11-20 09:00:00"
+            assert len(cfg.recorded) == 1
+
+            app._failure_arrived({"host": "bad.corp.example", "port": 443,
+                                  "rule": "DomainSuffix", "payload": "corp.example",
+                                  "outbound": "DIRECT", "detail": "newer"})
+            assert app.failures[0]["detail"] == "newer"
+            assert len(cfg.recorded) == 1
+    asyncio.run(scenario())

@@ -93,7 +93,8 @@ def _failure_entry(raw):
             "payload": str(raw.get("payload") or ""),
             "outbound": str(raw.get("outbound") or "-"),
             "detail": str(raw.get("detail") or "")[:_FAILURE_DETAIL_MAX],
-            "time": str(raw.get("time") or "")}
+            "time": str(raw.get("time") or ""),
+            "api": str(raw.get("api") or "")}
 
 
 def _fake_ip_network(value, version, key):
@@ -441,8 +442,7 @@ class MihomoConfig:
     def failure_log(self):
         return os.path.join(self.state_dir, "failures.json")
 
-    def failure_history(self):
-        """Return the newest-first failed dials recorded on this machine."""
+    def _stored_failures(self):
         try:
             with open(self.failure_log, encoding="utf-8") as f:
                 entries = json.load(f)
@@ -450,20 +450,32 @@ class MihomoConfig:
             return []
         if not isinstance(entries, list):
             return []
-        history = [entry for entry in map(_failure_entry, entries) if entry is not None]
+        return [entry for entry in map(_failure_entry, entries) if entry is not None]
+
+    def failure_history(self):
+        """Return the newest-first failed dials recorded for this controller."""
+        history = [e for e in self._stored_failures() if e["api"] == self.api]
         return history[:FAILURE_HISTORY_MAX]
 
     def record_failure(self, failure):
-        """Persist one failed dial, replacing the record for the same host:port."""
-        entry = _failure_entry(dict(failure, time=time.strftime("%Y-%m-%d %H:%M:%S")))
+        """Persist one failed dial for this controller, replacing the same host:port."""
+        entry = _failure_entry(dict(failure, time=time.strftime("%Y-%m-%d %H:%M:%S"),
+                                    api=self.api))
         if entry is None:
             return
-        entries = [e for e in self.failure_history()
-                   if (e["host"], e["port"]) != (entry["host"], entry["port"])]
+        entries = [e for e in self._stored_failures()
+                   if (e["api"], e["host"], e["port"])
+                   != (entry["api"], entry["host"], entry["port"])]
         entries.insert(0, entry)
+        # Bound each controller separately so one busy profile cannot evict another.
+        kept, seen = [], {}
+        for e in entries:
+            seen[e["api"]] = seen.get(e["api"], 0) + 1
+            if seen[e["api"]] <= FAILURE_HISTORY_MAX:
+                kept.append(e)
         os.makedirs(self.state_dir, exist_ok=True)
         _atomic_write(self.failure_log,
-                      json.dumps(entries[:FAILURE_HISTORY_MAX], ensure_ascii=False), 0o600)
+                      json.dumps(kept, ensure_ascii=False), 0o600)
 
     def apply(self, log=print, domains=None):
         """Ask ClashTUI to regenerate and reload via the Mihomo API, then check DNS."""

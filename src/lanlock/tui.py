@@ -339,6 +339,7 @@ class LanlockApp(App):
         self._status_line = None
         # Failed dials, newest first; filled by the log watcher on the UI thread.
         self.failures = []
+        self._recorded_keys = set()
         self._logs_stop = threading.Event()
         self._history_error = False
 
@@ -496,32 +497,42 @@ class LanlockApp(App):
             self.log_write(f"[yellow]failure history unavailable:[/] {e}")
             return
         known = {(f["host"], f["port"]) for f in self.failures}
-        self.failures.extend(f for f in history
-                             if (f["host"], f["port"]) not in known)
+        for entry in history:
+            if (entry["host"], entry["port"]) not in known:
+                entry.setdefault("count", 1)
+                self.failures.append(entry)
+        del self.failures[FAILURE_HISTORY:]
 
     def _failure_arrived(self, failure) -> None:
         key = (failure["host"], failure["port"])
         known = next((f for f in self.failures
                       if (f["host"], f["port"]) == key), None)
-        if known is not None:
-            # Refresh the detail and count, but keep the recorded first-seen time
-            # so the panel and failures.json agree after a restart.
+        is_new = known is None
+        if is_new:
+            known = dict(failure)
+            known["count"] = 0
+            self.failures.insert(0, known)
+            del self.failures[FAILURE_HISTORY:]
+        else:
+            # Keep the recorded time until this session's first occurrence.
             known.update({k: v for k, v in failure.items() if k != "time"})
-            known["count"] = known.get("count", 1) + 1
+        known["count"] = known.get("count", 0) + 1
+        if key in self._recorded_keys:
             return
-        failure["count"] = 1
-        failure["time"] = time.strftime("%Y-%m-%d %H:%M:%S")
-        self.failures.insert(0, failure)
-        del self.failures[FAILURE_HISTORY:]
+        # One write per host:port per run keeps a retrying dial from rewriting
+        # the state file, while a new session still refreshes the record.
+        known["time"] = time.strftime("%Y-%m-%d %H:%M:%S")
+        self._recorded_keys.add(key)
         try:
-            self.cfg.record_failure(failure)
+            self.cfg.record_failure(known)
         except OSError as e:
             if not self._history_error:
                 self._history_error = True
                 self.log_write(f"[yellow]cannot save failure history:[/] {e}")
-        self.log_write(f"[red]failed[/] {failure['host']}:{failure['port']} "
-                       f"{_rule_label(failure['rule'], failure['payload'])} -> "
-                       f"{failure['outbound']} [dim](l to inspect and add)[/]")
+        if is_new:
+            self.log_write(f"[red]failed[/] {known['host']}:{known['port']} "
+                           f"{_rule_label(known['rule'], known['payload'])} -> "
+                           f"{known['outbound']} [dim](l to inspect and add)[/]")
 
     @on(FailureWatchFailed)
     def _failure_watch_failed(self, event: FailureWatchFailed) -> None:

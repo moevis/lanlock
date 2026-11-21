@@ -1,3 +1,4 @@
+import json
 import os
 from pathlib import Path
 from stat import S_IMODE
@@ -233,7 +234,8 @@ def test_failure_history_roundtrip_and_dedupe(tmp_path):
     assert history[0]["detail"] == "again"
     assert history[0]["time"]
     assert list(history[0]) == ["host", "port", "rule", "payload",
-                                "outbound", "detail", "time"]
+                                "outbound", "detail", "time", "api"]
+    assert history[0]["api"] == cfg.api
 
 
 def test_failure_history_ignores_corrupt_files_and_bad_entries(tmp_path):
@@ -243,6 +245,35 @@ def test_failure_history_ignores_corrupt_files_and_bad_entries(tmp_path):
     path.write_text("not json", encoding="utf-8")
     assert cfg.failure_history() == []
 
-    path.write_text('[{"host": "a.example", "port": 1}, 7, {"port": 2}]',
-                    encoding="utf-8")
+    path.write_text(json.dumps([{"host": "a.example", "port": 1, "api": cfg.api},
+                                7, {"port": 2}]), encoding="utf-8")
     assert [h["host"] for h in cfg.failure_history()] == ["a.example"]
+
+
+def test_failure_history_is_scoped_to_the_controller(tmp_path):
+    state = tmp_path / "state"
+    first = MihomoConfig(state_dir=state, api="http://127.0.0.1:9090")
+    second = MihomoConfig(state_dir=state, api="http://127.0.0.1:9091")
+    first.record_failure({"host": "a.example", "port": 1, "rule": "r",
+                          "payload": "", "outbound": "DIRECT", "detail": "a"})
+    second.record_failure({"host": "b.example", "port": 2, "rule": "r",
+                           "payload": "", "outbound": "DIRECT", "detail": "b"})
+
+    assert [h["host"] for h in first.failure_history()] == ["a.example"]
+    assert [h["host"] for h in second.failure_history()] == ["b.example"]
+
+
+def test_failure_history_caps_entries_and_detail(tmp_path):
+    cfg = MihomoConfig(tmp_path / "mihomo", state_dir=tmp_path / "state")
+    path = Path(cfg.failure_log)
+    path.parent.mkdir(parents=True)
+    path.write_text(json.dumps([
+        {"host": f"h{i}.example", "port": 1, "api": cfg.api} for i in range(205)
+    ]), encoding="utf-8")
+    history = cfg.failure_history()
+    assert len(history) == 200
+    assert history[0]["host"] == "h0.example"
+
+    cfg.record_failure({"host": "long.example", "port": 443, "rule": "r",
+                        "payload": "", "outbound": "DIRECT", "detail": "x" * 5000})
+    assert len(cfg.failure_history()[0]["detail"]) == 2000
