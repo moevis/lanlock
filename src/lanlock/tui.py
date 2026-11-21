@@ -130,6 +130,42 @@ class ScopeScreen(ModalScreen):
         self.dismiss(None)
 
 
+class ControllerScreen(ModalScreen):
+    """Enter the controller URL and secret for the rest of the session."""
+
+    BINDINGS = [Binding("escape", "cancel", "cancel", show=False)]
+
+    CSS = """
+    ControllerScreen { align: center middle; }
+    #controller-box { width: 84; height: auto; background: $panel; border: thick $primary; padding: 1 2; }
+    #controller-box Input { margin: 0 0 1 0; }
+    #controller-state { margin-bottom: 1; }
+    #controller-help { color: $text-muted; }
+    """
+
+    def __init__(self, api, secret, state) -> None:
+        super().__init__()
+        self._api = api
+        self._secret = secret
+        self._state = state
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="controller-box"):
+            yield Static(f"controller: {self._state}", id="controller-state")
+            yield Input(value=self._api, placeholder="http://127.0.0.1:9090", id="api")
+            yield Input(value=self._secret, password=True,
+                        placeholder="secret (blank keeps the current one)", id="secret")
+            yield Static("Enter applies to this session · Esc cancels", id="controller-help")
+
+    @on(Input.Submitted)
+    def _submitted(self, event: Input.Submitted) -> None:
+        self.dismiss({"api": self.query_one("#api", Input).value.strip(),
+                      "secret": self.query_one("#secret", Input).value.strip()})
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+
 class LiveScreen(ModalScreen):
     """Open connections plus recorded failures, with a state filter.
 
@@ -319,6 +355,7 @@ class LanlockApp(App):
         Binding("w", "apply", "apply"),
         Binding("s", "save", "save"),
         Binding("r", "reload", "reload"),
+        Binding("c", "controller", "controller"),
         Binding("l", "live", "live"),
         Binding("j", "cursor_down", "down", show=False),
         Binding("k", "cursor_up", "up", show=False),
@@ -388,7 +425,8 @@ class LanlockApp(App):
         self._request_status_refresh()
         self._watch_logs()
         self.log_write("[dim]a add · d delete · y sync rule/filter · v verify · t dns · "
-                       "w apply · s save · r reload · l live · j/k move · q quit[/]")
+                       "w apply · s save · r reload · l live · c controller · "
+                       "j/k move · q quit[/]")
 
     def on_unmount(self) -> None:
         self._logs_stop.set()
@@ -557,6 +595,24 @@ class LanlockApp(App):
         if not self.is_running:
             return
         self.log_write(f"[yellow]failure log unavailable:[/] {event.error}")
+
+    def action_controller(self) -> None:
+        self.push_screen(
+            ControllerScreen(self.cfg.api, self.cfg.secret, self.cfg.controller_state()),
+            self._controller_chosen)
+
+    def _controller_chosen(self, values) -> None:
+        if not values or not self.is_running:
+            return
+        api = values.get("api") or self.cfg.api
+        if not api.startswith(("http://", "https://")):
+            self.log_write("[red]controller URL must start with http:// or https://[/]")
+            return
+        self.cfg.api = api
+        if values.get("secret"):
+            self.cfg.secret = values["secret"]
+        self._request_status_refresh()
+        self.log_write(f"[dim]controller: {api}[/]")
 
     def action_live(self) -> None:
         hint = self.cfg.controller_hint

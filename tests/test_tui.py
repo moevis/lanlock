@@ -14,8 +14,9 @@ pytest.importorskip("textual")
 
 
 from lanlock import cli  # noqa: E402
-from lanlock.tui import (FailureSeen, LanlockApp, LiveScreen, ScopeScreen,  # noqa: E402
-                         main as tui_main, wildcard_parent)
+from lanlock.tui import (  # noqa: E402
+    ControllerScreen, FailureSeen, LanlockApp, LiveScreen, ScopeScreen,
+    main as tui_main, wildcard_parent)
 from textual.widgets import DataTable, Input, Static  # noqa: E402
 
 BASE_TEXT = """\
@@ -53,6 +54,8 @@ class FakeConfig:
         self.add_error = None
 
         self.flclash = False
+        self.api = "http://127.0.0.1:9090"
+        self.secret = ""
         self.state = "ready"
         self.apply_result = apply_result
         self.apply_error = None
@@ -630,6 +633,48 @@ def test_add_exact_host_from_the_chooser():
             assert isinstance(app.screen, ScopeScreen)
             await pilot.click("#exact")
             assert "DOMAIN-SUFFIX,aaa.bbb.cc,DIRECT" in app.text
+    asyncio.run(scenario())
+
+
+def test_controller_screen_sets_api_and_secret_for_the_session():
+    async def scenario():
+        cfg = FakeConfig()
+        app = Harness(cfg)
+        async with app.run_test() as pilot:
+            await pilot.press("c")
+            for _ in range(100):
+                if isinstance(app.screen, ControllerScreen):
+                    break
+                await asyncio.sleep(0.01)
+            assert isinstance(app.screen, ControllerScreen)
+            app.screen.query_one("#api", Input).value = "http://127.0.0.1:9999"
+            app.screen.query_one("#secret", Input).value = "s3cret"
+            await pilot.press("enter")
+            for _ in range(100):
+                if cfg.api.endswith(":9999"):
+                    break
+                await asyncio.sleep(0.01)
+            assert cfg.api == "http://127.0.0.1:9999"
+            assert cfg.secret == "s3cret"
+            assert "controller: http://127.0.0.1:9999" in _log(app)
+    asyncio.run(scenario())
+
+
+def test_controller_screen_rejects_a_bare_host():
+    async def scenario():
+        cfg = FakeConfig()
+        app = Harness(cfg)
+        async with app.run_test() as pilot:
+            await pilot.press("c")
+            for _ in range(100):
+                if isinstance(app.screen, ControllerScreen):
+                    break
+                await asyncio.sleep(0.01)
+            app.screen.query_one("#api", Input).value = "127.0.0.1:9090"
+            await pilot.press("enter")
+            await asyncio.sleep(0.05)
+            assert cfg.api == "http://127.0.0.1:9090"   # unchanged
+            assert "must start with http://" in _log(app)
     asyncio.run(scenario())
 
 
