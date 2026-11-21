@@ -8,7 +8,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from importlib import import_module
 from pathlib import Path
-from threading import Thread
+from threading import Event, Thread
 from time import sleep as real_sleep
 from types import SimpleNamespace
 
@@ -798,3 +798,63 @@ def test_watch_once_reads_ndjson_until_idle(monkeypatch):
     assert [f["host"] for f in failures] == ["bad.corp.example"]
     assert made[0].path == "/logs?level=warning"
     assert made[0].closed
+
+
+def _watch_connection(status=200, chunks=(), on_empty=None):
+    class Response:
+        def __init__(self):
+            self.status = status
+            self.chunks = list(chunks)
+
+        def read1(self, size):
+            if self.chunks:
+                return self.chunks.pop(0)
+            if on_empty is not None:
+                raise on_empty
+            return b""
+
+    class Connection:
+        def __init__(self, *args, **kwargs):
+            self.sock = _Sock()
+            self.response = Response()
+            self.closed = False
+
+        def request(self, method, path, headers=None):
+            pass
+
+        def getresponse(self):
+            return self.response
+
+        def close(self):
+            self.closed = True
+
+    return Connection
+
+
+def test_watch_once_raises_when_the_stream_closes(monkeypatch):
+    monkeypatch.setattr(probe_mod.http.client, "HTTPConnection", _watch_connection())
+    with pytest.raises(OSError, match="closed the log stream"):
+        list(probe_mod._watch_once("http://127.0.0.1:9090", None))
+
+
+def test_watch_once_surfaces_unauthorized(monkeypatch):
+    monkeypatch.setattr(probe_mod.http.client, "HTTPConnection",
+                        _watch_connection(status=401))
+    with pytest.raises(ValueError, match="HTTP 401"):
+        list(probe_mod._watch_once("http://127.0.0.1:9090", None))
+
+
+def test_watch_failures_stops_during_backoff(monkeypatch):
+    stop = Event()
+    attempts = []
+
+    def factory(*args, **kwargs):
+        attempts.append(args)
+        stop.set()
+        raise ConnectionRefusedError
+
+    monkeypatch.setattr(probe_mod.http.client, "HTTPConnection", factory)
+    started = time.monotonic()
+    assert list(probe_mod.watch_failures("http://127.0.0.1:9090", stop)) == []
+    assert attempts
+    assert time.monotonic() - started < probe_mod.WATCH_RETRY_DELAY

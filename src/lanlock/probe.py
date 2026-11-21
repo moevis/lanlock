@@ -30,9 +30,6 @@ DIAL_FAILED = re.compile(r"dial (\S+) \(match ([^)]+)\)")
 # The destination token after the connection arrow: host:port, and not a
 # port-prefix of a longer number.
 DESTINATION = re.compile(r"-->\s*([A-Za-z0-9_.-]+):(\d+)(?![\w.:-])")
-# In a failure line the destination follows the arrow too, but the error text
-# after the port is free-form, so no lookahead is needed.
-AFTER_ARROW = re.compile(r"-->\s*([A-Za-z0-9_.-]+):(\d+)")
 
 API_TIMEOUT = 2.0
 CONNECTION_WINDOW = 2.0
@@ -241,7 +238,9 @@ def parse_failure(payload):
     if not isinstance(payload, str) or " error:" not in payload:
         return None
     decision = _parse_log_line(payload)
-    destination = AFTER_ARROW.search(payload)
+    arrow = payload.find("-->")
+    destination = (DESTINATION.search(payload, arrow)
+                   if arrow != -1 else None)
     if decision is None or destination is None:
         return None
     rule, rule_payload, outbound = decision
@@ -271,6 +270,10 @@ def _watch_once(api, stop):
             response = connection.getresponse()
         except TimeoutError:
             return
+        if response.status in (401, 403):
+            # A wrong or missing secret will not fix itself; let the caller say so.
+            raise ValueError(f"controller /logs returned HTTP {response.status} "
+                             "(check LANLOCK_API_SECRET)")
         if response.status != 200:
             raise OSError(f"controller /logs returned HTTP {response.status}")
         buffer = b""

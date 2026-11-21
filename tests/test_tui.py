@@ -660,6 +660,7 @@ def test_late_failure_after_unmount_is_ignored():
             pass
         # The watcher can post while run_test drains a closing app; the old
         # handler logged through query_one and raised NoMatches.
+        assert app._logs_stop.is_set()  # on_unmount stopped the watcher
         app._failure_seen(FailureSeen({
             "host": "late.corp.example", "port": 443, "rule": "DomainSuffix",
             "payload": "corp.example", "outbound": "DIRECT", "detail": "x"}))

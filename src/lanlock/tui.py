@@ -155,7 +155,8 @@ class LiveScreen(ModalScreen):
 
     def compose(self) -> ComposeResult:
         with Vertical(id="live-box"):
-            yield Static("recent connections · failed dials", id="live-title")
+            yield Static("open connections · failed dials (captured since launch)",
+                         id="live-title")
             yield DataTable(id="live-table")
             yield Static("Enter add · j/k move · Esc close", id="live-help")
 
@@ -459,6 +460,8 @@ class LanlockApp(App):
         try:
             for failure in self.cfg.failure_stream(self._logs_stop):
                 self.post_message(FailureSeen(failure))
+        except ValueError as e:
+            self.post_message(FailureWatchFailed(str(e)))
         except Exception as e:
             self.post_message(FailureWatchFailed(f"{type(e).__name__}: {e}"))
 
