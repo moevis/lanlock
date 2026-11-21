@@ -367,6 +367,16 @@ def test_failure_history_caps_entries_and_detail(tmp_path):
     assert len(cfg.failure_history()[0]["detail"]) == 2000
 
 
+def test_help_survives_a_legacy_windows_pipe():
+    env = dict(os.environ, PYTHONIOENCODING="cp1252")
+    result = subprocess.run(
+        [sys.executable, "-c",
+         "from lanlock.cli import main; raise SystemExit(main(['--help']))"],
+        capture_output=True, env=env)
+    assert result.returncode == 0, result.stderr[-500:]
+    assert b"UnicodeEncodeError" not in result.stderr
+
+
 def test_version_flag(capsys):
     with pytest.raises(SystemExit) as exc:
         cli.main(["--version"])

@@ -6,6 +6,19 @@ from . import __version__
 from .config import DEFAULT_API, DEFAULT_RESOLVER, MihomoConfig, norm
 
 
+def _tolerant_stdio():
+    """Stop non-ASCII output from crashing a redirected Windows stream.
+
+    Profile labels, paths and the controller hint are not guaranteed ASCII; a
+    cp1252 pipe would raise UnicodeEncodeError while printing them.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(errors="replace")
+        except (AttributeError, ValueError, OSError):
+            pass
+
+
 def _cfg(args):
     return MihomoConfig(config_dir=args.config_dir, api=args.api, profile=args.profile,
                         resolver=args.resolver, backend=args.backend,
@@ -27,8 +40,8 @@ def build_parser():
                    help="clashtui profile name, or a FlClash profile name or id "
                         "(auto-detected)")
     p.add_argument("--secret", default=None,
-                   help="controller secret (default: $LANLOCK_API_SECRET, then "
-                        "FlClash's stored 外部控制器密钥)")
+                   help="controller secret (default: $LANLOCK_API_SECRET, then the "
+                        "secret stored in FlClash's External Controller settings)")
     p.add_argument("--resolver", default=DEFAULT_RESOLVER,
                    help="resolvers written to dns.nameserver-policy for each domain in "
                         "a FlClash profile (default: %(default)s); a configured "
@@ -71,6 +84,7 @@ def tui_main(argv=None):
 
 
 def main(argv=None):
+    _tolerant_stdio()
     args = build_parser().parse_args(argv)
     # Report a missing TUI extra before resolving a backend: the extra is what
     # the user asked for, and it must not depend on any configuration existing.

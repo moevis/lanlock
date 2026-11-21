@@ -15,6 +15,7 @@ from textual.screen import ModalScreen
 from textual.widgets import Button, DataTable, Footer, Header, Input, RichLog, Static
 
 from . import __version__
+from . import cli
 from .config import DEFAULT_API, DEFAULT_RESOLVER, MihomoConfig, norm
 
 VERDICT_STYLE = {
@@ -882,6 +883,7 @@ def run(cfg=None):
 
 
 def main(argv=None):
+    cli._tolerant_stdio()
     p = argparse.ArgumentParser(prog="lanlock-tui")
     p.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     p.add_argument("--config-dir", default=None,
@@ -895,8 +897,8 @@ def main(argv=None):
                    help="clashtui profile name, or a FlClash profile name or id "
                         "(auto-detected)")
     p.add_argument("--secret", default=None,
-                   help="controller secret (default: $LANLOCK_API_SECRET, then "
-                        "FlClash's stored 外部控制器密钥)")
+                   help="controller secret (default: $LANLOCK_API_SECRET, then the "
+                        "secret stored in FlClash's External Controller settings)")
     p.add_argument("--resolver", default=DEFAULT_RESOLVER,
                    help="resolvers written to dns.nameserver-policy for each domain in "
                         "a FlClash profile (default: %(default)s); a configured "
