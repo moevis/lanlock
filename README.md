@@ -57,6 +57,9 @@ uv tool install --force --refresh "lanlock[tui] @ git+https://github.com/moevis/
 pipx install --force "lanlock[tui] @ git+https://github.com/moevis/lanlock.git"
 ```
 
+For the first update after the command rename, run `pipx uninstall lanlock`
+before the install: older pipx keeps the retired `mihomo-*` launchers.
+
 Virtual environment or local clone:
 
 ```bash
@@ -128,9 +131,10 @@ lanlock add --no-apply corp.example
 lanlock sync --no-apply
 ```
 
-`lanlock tui` and `lanlock-tui` are equivalent. The TUI requires the `tui`
-extra. `check` reports what the controller saw; without one (a plain FlClash
-setup, for example) it reports DNS answers only.
+`lanlock tui` and `lanlock-tui` start the same UI; it needs the `tui` extra, and
+without that extra `lanlock-tui` reports the missing extra instead of starting.
+`check` reports what the controller saw; without one (a plain FlClash setup,
+for example) it reports DNS answers only.
 
 Useful global options:
 

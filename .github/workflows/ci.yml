@@ -24,6 +24,8 @@ jobs:
       - run: python -m pytest
       - run: lanlock --help
       - run: lanlock-tui --help
+      - run: lanlock --version
+      - run: lanlock-tui --version
 
   package:
     runs-on: ubuntu-latest
