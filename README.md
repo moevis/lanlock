@@ -46,9 +46,8 @@ python -m venv .venv
 .venv/bin/pip install -e ".[tui]"
 ```
 
-All forms install the `lanlock` and `lanlock-tui` commands (`mihomo-internal`
-and `mihomo-tui` stay available as aliases); drop `[tui]` to skip the terminal
-UI.
+All forms install the `lanlock` and `lanlock-tui` commands; drop `[tui]` to
+skip the terminal UI.
 
 ## Update
 

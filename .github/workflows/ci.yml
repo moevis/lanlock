@@ -24,7 +24,6 @@ jobs:
       - run: python -m pytest
       - run: lanlock --help
       - run: lanlock-tui --help
-      - run: mihomo-internal --help
 
   package:
     runs-on: ubuntu-latest
