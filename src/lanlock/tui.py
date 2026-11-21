@@ -2,6 +2,7 @@
 import argparse
 import ipaddress
 import threading
+import time
 
 from rich.text import Text
 from textual import on, work
@@ -127,12 +128,13 @@ class ScopeScreen(ModalScreen):
 
 
 class LiveScreen(ModalScreen):
-    """Recent connections plus the failures seen since the app started."""
+    """Open connections plus recorded failures, with a state filter."""
 
     BINDINGS = [
         Binding("escape", "cancel", "close", show=False),
         Binding("j", "cursor_down", "down", show=False),
         Binding("k", "cursor_up", "up", show=False),
+        Binding("f", "cycle_filter", "filter", show=False),
     ]
 
     CSS = """
@@ -143,28 +145,32 @@ class LiveScreen(ModalScreen):
     #live-help { height: 1; color: $text-muted; }
     """
 
+    FILTERS = ("all", "fail", "live")
+    FILTER_LABEL = {"all": "all", "fail": "failed only", "live": "open only"}
+
     def __init__(self, load_connections, failures) -> None:
         super().__init__()
         self._load = load_connections
         self._failures = failures
         self._active = []
         self._rows = []
+        self._filter = "all"
         self._error = None
         self._help = None
         self._timer = None
 
     def compose(self) -> ComposeResult:
         with Vertical(id="live-box"):
-            yield Static("open connections · failed dials (captured since launch)",
+            yield Static("open connections · failed dials (this run + recorded)",
                          id="live-title")
             yield DataTable(id="live-table")
-            yield Static("Enter add · j/k move · Esc close", id="live-help")
+            yield Static("Enter add · j/k move · f filter · Esc close", id="live-help")
 
     def on_mount(self) -> None:
         table = self.query_one("#live-table", DataTable)
         table.cursor_type = "row"
         table.zebra_stripes = True
-        table.add_columns("state", "host", "port", "rule", "out", "n")
+        table.add_columns("state", "host", "port", "rule", "out", "n", "when")
         table.focus()
         self._help = self.query_one("#live-help", Static)
         self._fill()
@@ -222,20 +228,23 @@ class LiveScreen(ModalScreen):
         table = self.query_one("#live-table", DataTable)
         keep = table.cursor_row
         rows = []
-        for failure in self._failures():
-            rows.append({"state": "FAIL", "host": failure.get("host") or "?",
-                         "port": str(failure.get("port") or ""),
-                         "rule": _rule_label(failure.get("rule"),
-                                             failure.get("payload") or ""),
-                         "out": failure.get("outbound") or "-",
-                         "n": str(failure.get("count", 1))})
-        rows.extend(self._active_rows(self._active))
+        if self._filter in ("all", "fail"):
+            for failure in self._failures():
+                rows.append({"state": "FAIL", "host": failure.get("host") or "?",
+                             "port": str(failure.get("port") or ""),
+                             "rule": _rule_label(failure.get("rule"),
+                                                 failure.get("payload") or ""),
+                             "out": failure.get("outbound") or "-",
+                             "n": str(failure.get("count", 1)),
+                             "when": failure.get("time") or ""})
+        if self._filter in ("all", "live"):
+            rows.extend(self._active_rows(self._active))
         self._rows = rows
         table.clear(columns=False)
         for row in rows:
             style = "bold red" if row["state"] == "FAIL" else "dim"
             table.add_row(Text(row["state"], style=style), row["host"], row["port"],
-                          row["rule"], row["out"], row["n"])
+                          row["rule"], row["out"], row["n"], row.get("when", ""))
         if rows:
             table.move_cursor(row=min(max(0, keep), len(rows) - 1))
         self._show_help()
@@ -244,10 +253,16 @@ class LiveScreen(ModalScreen):
         if self._help is None:
             return
         if text is None:
-            text = "Enter add · j/k move · Esc close"
+            text = (f"Enter add · j/k move · f filter: "
+                    f"{self.FILTER_LABEL[self._filter]} · Esc close")
             if self._error:
                 text = f"[red]{self._error}[/]"
         self._help.update(text)
+
+    def action_cycle_filter(self) -> None:
+        index = (self.FILTERS.index(self._filter) + 1) % len(self.FILTERS)
+        self._filter = self.FILTERS[index]
+        self._fill()
 
     # ---------- actions ----------
     @on(DataTable.RowSelected)
@@ -325,6 +340,7 @@ class LanlockApp(App):
         # Failed dials, newest first; filled by the log watcher on the UI thread.
         self.failures = []
         self._logs_stop = threading.Event()
+        self._history_error = False
 
     @property
     def dirty(self) -> bool:
@@ -350,6 +366,7 @@ class LanlockApp(App):
         table.add_columns("domain", "direct rule", "fake-ip-filter", "live")
         self.fill_table()
         table.focus()
+        self._load_history()
         self._request_status_refresh()
         self._watch_logs()
         self.log_write("[dim]a add · d delete · y sync rule/filter · v verify · t dns · "
@@ -472,17 +489,36 @@ class LanlockApp(App):
             return
         self._failure_arrived(event.failure)
 
+    def _load_history(self) -> None:
+        try:
+            history = self.cfg.failure_history()
+        except Exception as e:
+            self.log_write(f"[yellow]failure history unavailable:[/] {e}")
+            return
+        known = {(f["host"], f["port"]) for f in self.failures}
+        self.failures.extend(f for f in history
+                             if (f["host"], f["port"]) not in known)
+
     def _failure_arrived(self, failure) -> None:
         key = (failure["host"], failure["port"])
         known = next((f for f in self.failures
                       if (f["host"], f["port"]) == key), None)
         if known is not None:
-            known.update(failure)
+            # Refresh the detail and count, but keep the recorded first-seen time
+            # so the panel and failures.json agree after a restart.
+            known.update({k: v for k, v in failure.items() if k != "time"})
             known["count"] = known.get("count", 1) + 1
             return
         failure["count"] = 1
+        failure["time"] = time.strftime("%Y-%m-%d %H:%M:%S")
         self.failures.insert(0, failure)
         del self.failures[FAILURE_HISTORY:]
+        try:
+            self.cfg.record_failure(failure)
+        except OSError as e:
+            if not self._history_error:
+                self._history_error = True
+                self.log_write(f"[yellow]cannot save failure history:[/] {e}")
         self.log_write(f"[red]failed[/] {failure['host']}:{failure['port']} "
                        f"{_rule_label(failure['rule'], failure['payload'])} -> "
                        f"{failure['outbound']} [dim](l to inspect and add)[/]")

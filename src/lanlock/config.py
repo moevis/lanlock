@@ -4,6 +4,7 @@ The override file is the source of truth; clashtui regenerates ``config.yaml``
 from it (profile + override merge), so nothing here ever edits the artifact.
 """
 import ipaddress
+import json
 import os
 import re
 import socket
@@ -30,8 +31,21 @@ def _default_config_dir():
     return os.path.join(directory, "clashtui", "mihomo")
 
 
+def _default_state_dir():
+    if sys.platform == "win32":
+        base = os.environ.get("LOCALAPPDATA") or "~/AppData/Local"
+    elif sys.platform == "darwin":
+        base = "~/Library/Application Support"
+    else:
+        base = os.environ.get("XDG_STATE_HOME") or "~/.local/state"
+    return os.path.join(base, "mihomo-internal")
+
+
 DEFAULT_CONFIG_DIR = _default_config_dir()
+DEFAULT_STATE_DIR = _default_state_dir()
 DEFAULT_API = "http://127.0.0.1:9090"
+FAILURE_HISTORY_MAX = 200
+_FAILURE_DETAIL_MAX = 2000
 # Mihomo's standard fake-IP range; strict=False masks the host bits to /16.
 DEFAULT_FAKE_IP_RANGE = "198.18.0.1/16"
 _DEFAULT_FAKE_IP_NETWORKS = (ipaddress.ip_network(DEFAULT_FAKE_IP_RANGE, strict=False), None)
@@ -65,6 +79,21 @@ def _suffix(value):
     # Other mihomo patterns (wildcards, geosite, rule-set) are not domain suffixes.
     value = value.lower().removesuffix(".")
     return value if len(value) <= 253 and _DOMAIN_RE.fullmatch(value) else None
+
+
+def _failure_entry(raw):
+    """Return the history record stored for one failure, or None when unusable."""
+    if not isinstance(raw, dict):
+        return None
+    host, port = raw.get("host"), raw.get("port")
+    if not isinstance(host, str) or not host or not isinstance(port, int):
+        return None
+    return {"host": host, "port": port,
+            "rule": str(raw.get("rule") or "?"),
+            "payload": str(raw.get("payload") or ""),
+            "outbound": str(raw.get("outbound") or "-"),
+            "detail": str(raw.get("detail") or "")[:_FAILURE_DETAIL_MAX],
+            "time": str(raw.get("time") or "")}
 
 
 def _fake_ip_network(value, version, key):
@@ -229,10 +258,12 @@ def _atomic_write(path, text, mode):
 
 
 class MihomoConfig:
-    def __init__(self, config_dir=DEFAULT_CONFIG_DIR, api=DEFAULT_API, profile=None):
+    def __init__(self, config_dir=DEFAULT_CONFIG_DIR, api=DEFAULT_API, profile=None,
+                 state_dir=None):
         self.config_dir = os.path.expanduser(config_dir)
         self.api = api
         self.profile_override = profile
+        self.state_dir = os.path.expanduser(state_dir or DEFAULT_STATE_DIR)
 
     # ---------- paths ----------
     @property
@@ -405,6 +436,34 @@ class MihomoConfig:
         """Yield failed dials from the controller log stream until ``stop`` is set."""
         from .probe import watch_failures
         return watch_failures(self.api, stop=stop)
+
+    @property
+    def failure_log(self):
+        return os.path.join(self.state_dir, "failures.json")
+
+    def failure_history(self):
+        """Return the newest-first failed dials recorded on this machine."""
+        try:
+            with open(self.failure_log, encoding="utf-8") as f:
+                entries = json.load(f)
+        except (OSError, ValueError):
+            return []
+        if not isinstance(entries, list):
+            return []
+        history = [entry for entry in map(_failure_entry, entries) if entry is not None]
+        return history[:FAILURE_HISTORY_MAX]
+
+    def record_failure(self, failure):
+        """Persist one failed dial, replacing the record for the same host:port."""
+        entry = _failure_entry(dict(failure, time=time.strftime("%Y-%m-%d %H:%M:%S")))
+        if entry is None:
+            return
+        entries = [e for e in self.failure_history()
+                   if (e["host"], e["port"]) != (entry["host"], entry["port"])]
+        entries.insert(0, entry)
+        os.makedirs(self.state_dir, exist_ok=True)
+        _atomic_write(self.failure_log,
+                      json.dumps(entries[:FAILURE_HISTORY_MAX], ensure_ascii=False), 0o600)
 
     def apply(self, log=print, domains=None):
         """Ask ClashTUI to regenerate and reload via the Mihomo API, then check DNS."""

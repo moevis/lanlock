@@ -216,3 +216,33 @@ def test_dns_uses_the_system_resolver_and_checks_all_addresses(monkeypatch):
 
     monkeypatch.setattr(config_mod.socket, "getaddrinfo", resolve)
     assert config_mod.dns_check("corp.example") == ("198.18.0.2", "FAKE-IP")
+
+
+def test_failure_history_roundtrip_and_dedupe(tmp_path):
+    cfg = MihomoConfig(tmp_path / "mihomo", state_dir=tmp_path / "state")
+    cfg.record_failure({"host": "a.example", "port": 443, "rule": "DomainSuffix",
+                        "payload": "example", "outbound": "DIRECT",
+                        "detail": "first", "count": 2})
+    cfg.record_failure({"host": "b.example", "port": 8443, "rule": "DomainSuffix",
+                        "payload": "example", "outbound": "DIRECT", "detail": "second"})
+    cfg.record_failure({"host": "a.example", "port": 443, "rule": "DomainSuffix",
+                        "payload": "example", "outbound": "DIRECT", "detail": "again"})
+
+    history = cfg.failure_history()
+    assert [h["host"] for h in history] == ["a.example", "b.example"]
+    assert history[0]["detail"] == "again"
+    assert history[0]["time"]
+    assert list(history[0]) == ["host", "port", "rule", "payload",
+                                "outbound", "detail", "time"]
+
+
+def test_failure_history_ignores_corrupt_files_and_bad_entries(tmp_path):
+    cfg = MihomoConfig(tmp_path / "mihomo", state_dir=tmp_path / "state")
+    path = Path(cfg.failure_log)
+    path.parent.mkdir(parents=True)
+    path.write_text("not json", encoding="utf-8")
+    assert cfg.failure_history() == []
+
+    path.write_text('[{"host": "a.example", "port": 1}, 7, {"port": 2}]',
+                    encoding="utf-8")
+    assert [h["host"] for h in cfg.failure_history()] == ["a.example"]

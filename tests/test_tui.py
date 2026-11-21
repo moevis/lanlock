@@ -70,6 +70,8 @@ class FakeConfig:
 
         self.connections = []
         self.failure_feed = queue.Queue()
+        self.history = []
+        self.recorded = []
 
     @property
     def override(self):
@@ -145,6 +147,12 @@ class FakeConfig:
 
     def live_connections(self):
         return list(self.connections)
+
+    def failure_history(self):
+        return [dict(entry) for entry in self.history]
+
+    def record_failure(self, failure):
+        self.recorded.append(dict(failure))
 
     def failure_stream(self, stop=None):
         while stop is None or not stop.is_set():
@@ -606,6 +614,7 @@ def test_live_screen_lists_failures_and_active_connections():
             assert isinstance(screen, LiveScreen)
             assert screen._rows[0]["state"] == "FAIL"
             assert screen._rows[0]["host"] == "bad.corp.example"
+            assert cfg.recorded and cfg.recorded[0]["host"] == "bad.corp.example"
             assert screen._rows[1]["state"] == "live"
             assert screen._rows[1]["host"] == "corp.example"
 
@@ -665,4 +674,60 @@ def test_late_failure_after_unmount_is_ignored():
             "host": "late.corp.example", "port": 443, "rule": "DomainSuffix",
             "payload": "corp.example", "outbound": "DIRECT", "detail": "x"}))
         assert app.failures == []
+    asyncio.run(scenario())
+
+
+def test_live_screen_shows_recorded_failures_and_filters():
+    async def scenario():
+        cfg = FakeConfig()
+        cfg.history = [{"host": "old.corp.example", "port": 8443,
+                        "rule": "DomainSuffix", "payload": "corp.example",
+                        "outbound": "DIRECT", "detail": "dial tcp: timeout",
+                        "time": "2026-11-20 09:00:00"}]
+        cfg.connections = [
+            {"metadata": {"host": "corp.example", "destinationPort": "443"},
+             "rule": "DomainSuffix", "rulePayload": "corp.example",
+             "chains": ["DIRECT"]},
+        ]
+        app = Harness(cfg)
+        async with app.run_test() as pilot:
+            await pilot.press("l")
+            for _ in range(100):
+                if isinstance(app.screen, LiveScreen) and len(app.screen._rows) >= 2:
+                    break
+                await asyncio.sleep(0.01)
+            screen = app.screen
+            assert isinstance(screen, LiveScreen)
+            recorded = next(r for r in screen._rows if r["host"] == "old.corp.example")
+            assert recorded["state"] == "FAIL"
+            assert recorded["when"] == "2026-11-20 09:00:00"
+
+            await pilot.press("f")
+            assert [r["state"] for r in screen._rows] == ["FAIL"]
+            await pilot.press("f")
+            assert [r["state"] for r in screen._rows] == ["live"]
+            await pilot.press("f")
+            assert {r["state"] for r in screen._rows} == {"FAIL", "live"}
+            assert "filter: all" in str(
+                screen.query_one("#live-help", Static).render())
+    asyncio.run(scenario())
+
+
+def test_repeat_failure_keeps_first_seen_time_and_count():
+    async def scenario():
+        cfg = FakeConfig()
+        app = Harness(cfg)
+        async with app.run_test():
+            failure = {"host": "bad.corp.example", "port": 443,
+                       "rule": "DomainSuffix", "payload": "corp.example",
+                       "outbound": "DIRECT", "detail": "first"}
+            app._failure_arrived(dict(failure))
+            first = app.failures[0]["time"]
+            app._failure_arrived(dict(failure, detail="again"))
+
+            assert len(app.failures) == 1
+            assert app.failures[0]["count"] == 2
+            assert app.failures[0]["detail"] == "again"
+            assert app.failures[0]["time"] == first
+            assert len(cfg.recorded) == 1
     asyncio.run(scenario())

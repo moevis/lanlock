@@ -76,10 +76,14 @@ Adding a host below a parent (`aaa.bbb.cc`) asks whether to add that host or
 `dns.fake-ip-filter` entry, so hosts below the chosen name are covered; an
 explicit `*.` or `+.` prefix skips the prompt.
 
-`l` lists the controller's open connections and the failed dials seen since
-the UI started. Mihomo keeps no history: `/connections` is live-only and
-`/logs` streams new lines, so failures are collected while the TUI runs.
-Select a row and press Enter to add that host (or its parent) to the list.
+`l` lists the controller's open connections plus failed dials. Mihomo keeps no
+connection history: `/connections` is live-only and `/logs` streams new lines,
+so ended successful connections cannot be replayed. Failed dials are captured
+while the TUI runs and recorded in `failures.json` under the state directory
+(`$XDG_STATE_HOME/mihomo-internal`, `~/Library/Application
+Support/mihomo-internal`, or `%LOCALAPPDATA%\mihomo-internal`), keeping the
+newest 200 across restarts. `f` filters the panel: all → failed only → open
+only. Select a row and press Enter to add that host (or its parent).
 
 Useful global options:
 
