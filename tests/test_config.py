@@ -78,7 +78,8 @@ def test_macos_prefers_native_override_over_xdg_install(macos_home, tmp_path, mo
     assert config_mod._clashtui_dir() == os.path.join("~/.config", "clashtui", "mihomo")
     backend, resolved = config_mod.resolve(backend="clashtui")
     assert backend == "clashtui"
-    assert resolved == os.path.expanduser("~/.config/clashtui/mihomo")
+    assert os.path.normpath(resolved) == os.path.normpath(
+        os.path.expanduser("~/.config/clashtui/mihomo"))
     assert MihomoConfig(backend="clashtui").read() == "native override\n"
 
 

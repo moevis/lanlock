@@ -494,6 +494,11 @@ class _Override:
         return stream.getvalue()
 
 
+def _lf(text):
+    """Return ``text`` with CRLF and lone CR folded to LF."""
+    return text.replace("\r\n", "\n").replace("\r", "\n")
+
+
 def _atomic_write(path, text, mode):
     with NamedTemporaryFile(mode="w", encoding="utf-8", newline="", dir=os.path.dirname(path),
                             delete=False) as temp:
@@ -728,18 +733,19 @@ class MihomoConfig:
         except FileNotFoundError as e:
             if path is not None:
                 raise
+            # The path goes in the message rather than in ``filename``: OSError
+            # renders ``filename`` with repr(), which on Windows escapes every
+            # backslash and buries the path users need to copy.
             if self.flclash:
                 raise FileNotFoundError(
                     e.errno,
                     f"FlClash profile {self._flclash_target()[1]!r} is missing its "
                     f"profile file: {target}",
-                    e.filename,
                 ) from None
             raise FileNotFoundError(
                 e.errno,
-                "ClashTUI Mihomo override missing. Start ClashTUI to initialize it "
-                "or pass --config-dir pointing to its mihomo directory",
-                e.filename,
+                f"ClashTUI Mihomo override missing at {target}. Start ClashTUI to "
+                "initialize it or pass --config-dir pointing to its mihomo directory",
             ) from None
 
     def save(self, text, expect=None):
@@ -751,13 +757,13 @@ class MihomoConfig:
         editing: a file that changed since then is refused instead of overwritten,
         because FlClash (or its own editor) may have written it in between.
         """
-        text = text.replace("\r\n", "\n").replace("\r", "\n")
+        text = _lf(text)
         _Override(text)
         path = os.path.realpath(self.override)
         with open(path, encoding="utf-8", newline="") as f:
             before = f.read()
             mode = S_IMODE(os.fstat(f.fileno()).st_mode)
-        if expect is not None and before != expect:
+        if expect is not None and _lf(before) != _lf(expect):
             raise ValueError(f"{path} changed since it was read; re-run to edit the "
                              "current version")
         newline = "\r\n" if "\r\n" in before else "\n"

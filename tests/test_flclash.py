@@ -85,7 +85,9 @@ def _load(text):
 
 def test_detection_falls_back_to_flclash(macos_home):
     root = _flclash_dir(macos_home)
-    assert config_mod.resolve() == ("flclash", os.fspath(root))
+    backend, resolved = config_mod.resolve()
+    assert backend == "flclash"
+    assert os.path.normpath(resolved) == os.path.normpath(os.fspath(root))
     configured = MihomoConfig()
     assert configured.flclash and configured.config_dir == os.fspath(root)
 
@@ -98,8 +100,9 @@ def test_both_setups_are_an_error_instead_of_a_guess(macos_home, capsys):
 
     with pytest.raises(ValueError, match="found both") as excinfo:
         config_mod.resolve()
-    assert os.fspath(native) in str(excinfo.value)
-    assert os.fspath(root) in str(excinfo.value)
+    message = os.path.normpath(str(excinfo.value))
+    assert os.path.normpath(os.fspath(native)) in message
+    assert os.path.normpath(os.fspath(root)) in message
     assert MihomoConfig(backend="clashtui").override == os.path.join(
         os.fspath(native), "core_override_config.yaml")
     assert MihomoConfig(backend="flclash").flclash
@@ -307,3 +310,12 @@ def test_add_matches_the_profile_sequence_indent(cfg):
 def test_resolver_must_not_be_blank(cfg):
     with pytest.raises(ValueError, match="must name a DNS server"):
         MihomoConfig(cfg.config_dir, resolver="   ")
+
+
+def test_save_accepts_a_crlf_profile_that_was_read_as_lf(cfg):
+    # Windows: text read normally is LF, but the bytes on disk are CRLF.
+    Path(cfg.override).write_bytes(PROFILE.replace("\n", "\r\n").encode())
+    text, _ = cfg.add("corp.example")
+    cfg.save(text, expect=PROFILE)
+    saved = Path(cfg.override).read_bytes()
+    assert b"\r\n" in saved and b"+.corp.example" in saved
