@@ -1,0 +1,155 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="984" height="426.0" viewBox="0 0 984 426.0" role="img" aria-labelledby="title description" style="color-scheme: light dark">
+  <title id="title">lanlock TUI</title>
+  <desc id="description">Full application screenshot after changing a domain's outbound in an example profile. The draft table, edit log and available actions are visible.</desc>
+  <!-- Full Textual/Rich capture. Local fonts and theme-aware foreground colors. -->
+  <style>
+    .capture-text { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 20px; }
+    .frame-title { fill: var(--fg, currentColor); font-family: ui-monospace, monospace; font-size: 18px; font-weight: 700; }
+    .capture-r1 { fill: var(--fg, currentColor); }
+    .capture-r2 { fill: var(--fg, currentColor); }
+    .capture-r3 { fill: var(--muted, currentColor); opacity: .68; }
+    .capture-r4 { fill: var(--fg, currentColor); font-weight: 700; }
+    .capture-r5 { fill: var(--error, currentColor); font-weight: 700; }
+    .capture-r6 { fill: var(--accent, currentColor); font-weight: 700; }
+    .capture-r7 { fill: var(--success, currentColor); }
+    .capture-r8 { fill: var(--accent, currentColor); }
+    .capture-r9 { fill: var(--error, currentColor); }
+    .capture-r10 { fill: var(--border, currentColor); opacity: .46; }
+    .capture-r11 { fill: var(--border, currentColor); opacity: .46; }
+    .capture-r12 { fill: var(--muted, currentColor); opacity: .68; }
+    .capture-r13 { fill: var(--accent, currentColor); }
+    .capture-r14 { fill: var(--accent, currentColor); font-weight: 700; }
+    .capture-r15 { fill: var(--muted, currentColor); opacity: .68; }
+  </style>
+  <defs>
+    <clipPath id="capture-clip-terminal">
+      <rect x="0" y="0" width="1280.0" height="511.4" />
+    </clipPath>
+    <clipPath id="capture-line-0">
+    <rect x="0" y="1.5" width="1281" height="24.65"/>
+            </clipPath>
+<clipPath id="capture-line-1">
+    <rect x="0" y="25.9" width="1281" height="24.65"/>
+            </clipPath>
+<clipPath id="capture-line-2">
+    <rect x="0" y="50.3" width="1281" height="24.65"/>
+            </clipPath>
+<clipPath id="capture-line-3">
+    <rect x="0" y="74.7" width="1281" height="24.65"/>
+            </clipPath>
+<clipPath id="capture-line-4">
+    <rect x="0" y="99.1" width="1281" height="24.65"/>
+            </clipPath>
+<clipPath id="capture-line-5">
+    <rect x="0" y="123.5" width="1281" height="24.65"/>
+            </clipPath>
+<clipPath id="capture-line-6">
+    <rect x="0" y="147.9" width="1281" height="24.65"/>
+            </clipPath>
+<clipPath id="capture-line-7">
+    <rect x="0" y="172.3" width="1281" height="24.65"/>
+            </clipPath>
+<clipPath id="capture-line-8">
+    <rect x="0" y="196.7" width="1281" height="24.65"/>
+            </clipPath>
+<clipPath id="capture-line-9">
+    <rect x="0" y="221.1" width="1281" height="24.65"/>
+            </clipPath>
+<clipPath id="capture-line-10">
+    <rect x="0" y="245.5" width="1281" height="24.65"/>
+            </clipPath>
+<clipPath id="capture-line-11">
+    <rect x="0" y="269.9" width="1281" height="24.65"/>
+            </clipPath>
+<clipPath id="capture-line-12">
+    <rect x="0" y="294.3" width="1281" height="24.65"/>
+            </clipPath>
+<clipPath id="capture-line-13">
+    <rect x="0" y="318.7" width="1281" height="24.65"/>
+            </clipPath>
+<clipPath id="capture-line-14">
+    <rect x="0" y="343.1" width="1281" height="24.65"/>
+            </clipPath>
+<clipPath id="capture-line-15">
+    <rect x="0" y="367.5" width="1281" height="24.65"/>
+            </clipPath>
+<clipPath id="capture-line-16">
+    <rect x="0" y="391.9" width="1281" height="24.65"/>
+            </clipPath>
+<clipPath id="capture-line-17">
+    <rect x="0" y="416.3" width="1281" height="24.65"/>
+            </clipPath>
+<clipPath id="capture-line-18">
+    <rect x="0" y="440.7" width="1281" height="24.65"/>
+            </clipPath>
+<clipPath id="capture-line-19">
+    <rect x="0" y="465.1" width="1281" height="24.65"/>
+            </clipPath>
+    </defs>
+  <g transform="scale(0.757506)">
+    <rect x="1" y="1" width="1297" height="560.4" rx="8" fill="none" stroke="var(--border, currentColor)" stroke-opacity=".5"/>
+    <text class="frame-title" text-anchor="middle" x="649.5" y="27">lanlock</text>
+    <g class="capture-text" transform="translate(9,41)" clip-path="url(#capture-clip-terminal)">
+      <rect x=".5" y="75.2" width="1279.0" height="23.4" rx="2" fill="none" stroke="var(--accent, currentColor)" stroke-opacity=".52"/>
+      <text class="capture-r2" x="12.2" y="20" textLength="12.2" clip-path="url(#capture-line-0)">⭘</text>
+      <text class="capture-r2" x="475.8" y="20" textLength="85.4" clip-path="url(#capture-line-0)">lanlock</text>
+      <text class="capture-r3" x="561.2" y="20" textLength="36.6" clip-path="url(#capture-line-0)">&#160;—&#160;</text>
+      <text class="capture-r3" x="597.8" y="20" textLength="170.8" clip-path="url(#capture-line-0)">domain&#160;routing</text>
+      <text class="capture-r2" x="12.2" y="44.4" textLength="109.8" clip-path="url(#capture-line-1)">profile:&#160;</text>
+      <text class="capture-r4" x="122" y="44.4" textLength="85.4" clip-path="url(#capture-line-1)">example</text>
+      <text class="capture-r2" x="207.4" y="44.4" textLength="183" clip-path="url(#capture-line-1)">&#160;&#160;&#160;controller:&#160;</text>
+      <text class="capture-r4" x="390.4" y="44.4" textLength="61" clip-path="url(#capture-line-1)">ready</text>
+      <text class="capture-r2" x="451.4" y="44.4" textLength="292.8" clip-path="url(#capture-line-1)">&#160;&#160;&#160;file:&#160;example.yaml&#160;&#160;&#160;</text>
+      <text class="capture-r5" x="744.2" y="44.4" textLength="61" clip-path="url(#capture-line-1)">DIRTY</text>
+      <text class="capture-r2" x="805.2" y="44.4" textLength="134.2" clip-path="url(#capture-line-1)">&#160;&#160;&#160;rules:&#160;4</text>
+      <text class="capture-r4" x="0" y="68.8" textLength="244" clip-path="url(#capture-line-2)">&#160;domain&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;</text>
+      <text class="capture-r4" x="244" y="68.8" textLength="158.6" clip-path="url(#capture-line-2)">&#160;outbound&#160;&#160;&#160;&#160;</text>
+      <text class="capture-r4" x="402.6" y="68.8" textLength="195.2" clip-path="url(#capture-line-2)">&#160;fake-ip-filter&#160;</text>
+      <text class="capture-r4" x="597.8" y="68.8" textLength="73.2" clip-path="url(#capture-line-2)">&#160;live&#160;</text>
+      <text class="capture-r6" x="0" y="93.2" textLength="244" clip-path="url(#capture-line-3)">&#160;+.corp.example&#160;&#160;&#160;&#160;&#160;</text>
+      <text class="capture-r6" x="244" y="93.2" textLength="158.6" clip-path="url(#capture-line-3)">&#160;Proxy&#160;Group&#160;</text>
+      <text class="capture-r6" x="402.6" y="93.2" textLength="195.2" clip-path="url(#capture-line-3)">&#160;-&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;</text>
+      <text class="capture-r2" x="0" y="117.6" textLength="244" clip-path="url(#capture-line-4)">&#160;+.internal.example&#160;</text>
+      <text class="capture-r7" x="256.2" y="117.6" textLength="73.2" clip-path="url(#capture-line-4)">DIRECT</text>
+      <text class="capture-r7" x="414.8" y="117.6" textLength="12.2" clip-path="url(#capture-line-4)">y</text>
+      <text class="capture-r2" x="0" y="142" textLength="244" clip-path="url(#capture-line-5)">&#160;+.updates.example&#160;&#160;</text>
+      <text class="capture-r8" x="256.2" y="142" textLength="134.2" clip-path="url(#capture-line-5)">Proxy&#160;Group</text>
+      <text class="capture-r9" x="414.8" y="142" textLength="12.2" clip-path="url(#capture-line-5)">-</text>
+      <text class="capture-r10" x="0" y="190.8" textLength="12.2" clip-path="url(#capture-line-7)">▊</text>
+      <text class="capture-r11" x="12.2" y="190.8" textLength="1256.6" clip-path="url(#capture-line-7)">▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔</text>
+      <text class="capture-r11" x="1268.8" y="190.8" textLength="12.2" clip-path="url(#capture-line-7)">▎</text>
+      <text class="capture-r10" x="0" y="215.2" textLength="12.2" clip-path="url(#capture-line-8)">▊</text>
+      <text class="capture-r12" x="36.6" y="215.2" textLength="512.4" clip-path="url(#capture-line-8)">domain&#160;—&#160;Enter&#160;adds&#160;·&#160;Esc&#160;back&#160;to&#160;the&#160;list</text>
+      <text class="capture-r11" x="1268.8" y="215.2" textLength="12.2" clip-path="url(#capture-line-8)">▎</text>
+      <text class="capture-r10" x="0" y="239.6" textLength="12.2" clip-path="url(#capture-line-9)">▊</text>
+      <text class="capture-r11" x="12.2" y="239.6" textLength="1256.6" clip-path="url(#capture-line-9)">▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁</text>
+      <text class="capture-r11" x="1268.8" y="239.6" textLength="12.2" clip-path="url(#capture-line-9)">▎</text>
+      <text class="capture-r13" x="0" y="264" textLength="1281" clip-path="url(#capture-line-10)">─────────────────────────────────────────────────────────────────────────────────────────────────────────</text>
+      <text class="capture-r7" x="0" y="288.4" textLength="85.4" clip-path="url(#capture-line-11)">updated</text>
+      <text class="capture-r2" x="85.4" y="288.4" textLength="353.8" clip-path="url(#capture-line-11)">&#160;+.corp.example&#160;→&#160;Proxy&#160;Group</text>
+      <text class="capture-r14" x="0" y="508" textLength="36.6" clip-path="url(#capture-line-20)">&#160;a&#160;</text>
+      <text class="capture-r2" x="36.6" y="508" textLength="48.8" clip-path="url(#capture-line-20)">add&#160;</text>
+      <text class="capture-r14" x="85.4" y="508" textLength="36.6" clip-path="url(#capture-line-20)">&#160;e&#160;</text>
+      <text class="capture-r2" x="122" y="508" textLength="61" clip-path="url(#capture-line-20)">edit&#160;</text>
+      <text class="capture-r14" x="183" y="508" textLength="36.6" clip-path="url(#capture-line-20)">&#160;d&#160;</text>
+      <text class="capture-r2" x="219.6" y="508" textLength="85.4" clip-path="url(#capture-line-20)">delete&#160;</text>
+      <text class="capture-r14" x="305" y="508" textLength="36.6" clip-path="url(#capture-line-20)">&#160;v&#160;</text>
+      <text class="capture-r2" x="341.6" y="508" textLength="85.4" clip-path="url(#capture-line-20)">verify&#160;</text>
+      <text class="capture-r14" x="427" y="508" textLength="36.6" clip-path="url(#capture-line-20)">&#160;t&#160;</text>
+      <text class="capture-r2" x="463.6" y="508" textLength="61" clip-path="url(#capture-line-20)">test&#160;</text>
+      <text class="capture-r14" x="524.6" y="508" textLength="36.6" clip-path="url(#capture-line-20)">&#160;w&#160;</text>
+      <text class="capture-r2" x="561.2" y="508" textLength="73.2" clip-path="url(#capture-line-20)">apply&#160;</text>
+      <text class="capture-r14" x="634.4" y="508" textLength="36.6" clip-path="url(#capture-line-20)">&#160;r&#160;</text>
+      <text class="capture-r2" x="671" y="508" textLength="85.4" clip-path="url(#capture-line-20)">reload&#160;</text>
+      <text class="capture-r14" x="756.4" y="508" textLength="36.6" clip-path="url(#capture-line-20)">&#160;c&#160;</text>
+      <text class="capture-r2" x="793" y="508" textLength="134.2" clip-path="url(#capture-line-20)">controller&#160;</text>
+      <text class="capture-r14" x="927.2" y="508" textLength="36.6" clip-path="url(#capture-line-20)">&#160;l&#160;</text>
+      <text class="capture-r2" x="963.8" y="508" textLength="61" clip-path="url(#capture-line-20)">live&#160;</text>
+      <text class="capture-r14" x="1024.8" y="508" textLength="36.6" clip-path="url(#capture-line-20)">&#160;q&#160;</text>
+      <text class="capture-r2" x="1061.4" y="508" textLength="61" clip-path="url(#capture-line-20)">quit&#160;</text>
+      <text class="capture-r15" x="1134.6" y="508" textLength="12.2" clip-path="url(#capture-line-20)">▏</text>
+      <text class="capture-r14" x="1146.8" y="508" textLength="24.4" clip-path="url(#capture-line-20)">^p</text>
+      <text class="capture-r2" x="1171.2" y="508" textLength="97.6" clip-path="url(#capture-line-20)">&#160;palette</text>
+    </g>
+  </g>
+</svg>

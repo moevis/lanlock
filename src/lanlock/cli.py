@@ -51,7 +51,7 @@ def build_parser():
     sub = p.add_subparsers(dest="cmd", required=True)
 
     sub.add_parser("ls", help="list registered domains")
-    sub.add_parser("check", help="probe every domain, exit 1 on LEAK/FAKE-IP")
+    sub.add_parser("check", help="probe every domain, exit 1 on LEAK/FAKE-IP/MISMATCH")
     sub.add_parser("sync", help="make rules and fake-ip-filter agree both ways")
     sub.add_parser("tui", help="Textual UI")
 
@@ -107,7 +107,8 @@ def _run(args, cfg):
     if args.cmd == "ls":
         for row in cfg.rows(text):
             print(f"{row['domain']:40s} rule={'y' if row['rule'] else '-'} "
-                  f"filter={'y' if row['filter'] else '-'}")
+                  f"filter={'y' if row['filter'] else '-'}"
+                  + (f" target={row['match_target']}" if row.get("match_target") else ""))
         print(f"rules: {cfg.rule_count(text)} in {cfg.override}")
         print("backend:", f"{cfg.backend} ({cfg.config_dir})")
         print("profile:", cfg.active_profile() or "?")
@@ -119,8 +120,8 @@ def _run(args, cfg):
         if not domains:
             print("no domains registered")
             return 0
-        results = cfg.audit(log=print, domains=domains)
-        return 1 if any(r["verdict"] in ("LEAK", "FAKE-IP") for r in results) else 0
+        results = cfg.audit(log=print, domains=domains, text=text)
+        return 1 if any(r["verdict"] in ("LEAK", "FAKE-IP", "MISMATCH") for r in results) else 0
 
     if args.cmd == "sync":
         text, added = cfg.sync(text)

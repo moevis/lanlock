@@ -185,6 +185,32 @@ def test_api_entry_with_chain_is_used_and_leak_wins(isolated):
     assert result["verdict"] == "LEAK"
     assert result["outbound"] == "PROXY"
 
+@pytest.mark.parametrize("rule,payload,chains,want", [
+    ("DomainSuffix", DOMAIN, ["node", "fallback group"], "ok"),
+    ("DomainSuffix", DOMAIN, ["node", "other group"], "MISMATCH"),
+    ("DomainSuffix", DOMAIN, ["node", "fallback group", "other group"], "MISMATCH"),
+    ("Match", "", ["node", "fallback group"], "MISMATCH"),
+])
+def test_probe_pinned_route_checks_suffix_and_target(isolated, rule, payload, chains, want):
+    dns(isolated, "FAKE-IP", "198.18.0.9")
+    isolated.setattr(probe_mod, "CONNECTION_WINDOW", 0.2)
+    isolated.setattr(probe_mod, "live_connections", lambda api, secret=None: [
+        {"metadata": {"host": DOMAIN, "destinationPort": 443},
+         "rule": rule, "rulePayload": payload, "chains": chains},
+    ])
+    result = probe_mod.probe(DOMAIN, match_target="fallback group")
+    assert result["verdict"] == want
+    assert result["dns"] == "FAKE-IP"
+
+
+def test_log_fallback_can_verify_a_group_name_with_spaces(isolated):
+    dns(isolated, "ok")
+    parsed = probe_mod._parse_log_line(line(DOMAIN, 443, "fallback group[node]"))
+    logs(isolated, parsed)
+    assert probe_mod.probe(DOMAIN, match_target="fallback group")["verdict"] == "ok"
+    logs(isolated, ("DomainSuffix", DOMAIN, "node"))
+    assert probe_mod.probe(DOMAIN, match_target="fallback group")["verdict"] == "unknown"
+
 
 def test_similar_port_line_is_not_evidence():
     older = line(DOMAIN, 443, "PROXY")
@@ -564,7 +590,7 @@ def test_mihomo_audit_snapshots_configured_ranges(tmp_path, monkeypatch):
 
     calls = []
 
-    def fake_audit(domains, api=None, log=print, *, networks=None, secret=None):
+    def fake_audit(domains, api=None, log=print, *, networks=None, secret=None, match_targets=None):
         calls.append((list(domains), networks))
         return []
 

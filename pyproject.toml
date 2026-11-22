@@ -34,7 +34,7 @@ path = "src/lanlock/__init__.py"
 exclude = ["**/__pycache__/**", "**/*.py[cod]"]
 
 [tool.hatch.build.targets.sdist]
-include = ["/src/lanlock", "/tests", "/README.md", "/pyproject.toml"]
+include = ["/src/lanlock", "/tests", "/README.md", "/assets/lanlock-tui.svg", "/pyproject.toml"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/lanlock"]

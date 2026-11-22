@@ -5,6 +5,7 @@ import sys
 import threading
 import time
 
+from rich.markup import escape
 from rich.text import Text
 from textual import on, work
 from textual.app import App, ComposeResult
@@ -12,7 +13,8 @@ from textual.binding import Binding
 from textual.containers import Vertical
 from textual.message import Message
 from textual.screen import ModalScreen
-from textual.widgets import Button, DataTable, Footer, Header, Input, RichLog, Static
+from textual.widgets import Button, DataTable, Footer, Header, Input, OptionList, RichLog, Static
+from textual.widgets.option_list import Option
 
 from . import __version__
 from . import cli
@@ -21,6 +23,7 @@ from .config import DEFAULT_API, DEFAULT_RESOLVER, MihomoConfig, norm
 VERDICT_STYLE = {
     "ok": "green",
     "LEAK": "bold red",
+    "MISMATCH": "bold red",
     "FAKE-IP": "yellow",
     "skip": "dim",
     "unknown": "dim yellow",
@@ -44,19 +47,26 @@ def _is_ip(host):
     return True
 
 
-def wildcard_parent(raw, domain):
-    """Return the parent to offer as a wildcard, or None when there is no choice.
-
-    A short name has no meaningful parent (``bbb.cc`` must not offer ``cc``),
-    and an explicit ``*.``, ``+.`` or leading dot already states the scope.
-    """
+def domain_scopes(raw, domain):
+    """Offer the host and its suffixes, without a bare top-level label."""
     if raw.strip().startswith(("*.", "+.", ".")):
-        return None
-    if domain.count(".") < 2:
-        return None
-    parent = domain.split(".", 1)[1]
-    return parent if "." in parent else None
+        return [domain]
+    labels = domain.split(".")
+    return [domain, *(".".join(labels[i:]) for i in range(1, len(labels) - 1))]
 
+
+def covering_domain(host, domains):
+    """Closest registered suffix, matching only on label boundaries."""
+    domain = host
+    while domain:
+        if domain in domains:
+            return domain
+        _, _, domain = domain.partition(".")
+    return None
+
+
+def _needs_sync(row):
+    return not row.get("match_target") and row["rule"] != row["filter"]
 
 
 class StatusLoaded(Message):
@@ -94,40 +104,83 @@ class ConnectionsLoaded(Message):
         self.error = error
 
 
-class ScopeScreen(ModalScreen):
-    """Ask whether to add the typed host or its whole parent subtree."""
+class _RuleChoice(ModalScreen):
+    """Common keyboard navigation for the two rule choices."""
 
-    BINDINGS = [Binding("escape", "cancel", "cancel", show=False)]
+    BINDINGS = [
+        Binding("escape", "cancel", "cancel", show=False),
+        Binding("tab", "next_scope", "next scope", show=False, priority=True),
+        Binding("shift+tab", "previous_scope", "previous scope", show=False, priority=True),
+    ]
 
     CSS = """
-    ScopeScreen { align: center middle; }
-    #scope { width: 72; height: auto; background: $panel; border: thick $primary; padding: 1 2; }
-    #scope Button { width: 100%; margin-top: 1; }
+    ScopeScreen, RouteScreen { align: center middle; }
+    #rule-choice { width: 72; max-width: 100%; height: auto; max-height: 100%;
+                   background: $panel; border: thick $primary; padding: 1 2; }
+    #rule-options { height: auto; max-height: 60vh; }
     """
 
-    def __init__(self, domain: str, parent: str) -> None:
+    def __init__(self, prompt, choices, note=None) -> None:
         super().__init__()
-        self.domain = domain
-        self.parent_domain = parent
+        self.prompt = prompt
+        self.choices = choices
+        self.note = note
 
     def compose(self) -> ComposeResult:
-        with Vertical(id="scope"):
-            yield Static(f"Add [b]{self.domain}[/b] or all of "
-                         f"[b]{self.parent_domain}[/b]?")
-            yield Button(self.domain, id="exact", variant="primary")
-            yield Button(f"*.{self.parent_domain}   (all of {self.parent_domain})",
-                         id="parent")
-            yield Button("cancel", id="cancel")
-            yield Static("[dim]Both entries are DOMAIN-SUFFIX, so hosts below "
-                         "the chosen name are covered too.[/]")
+        with Vertical(id="rule-choice"):
+            yield Static(self.prompt, markup=False)
+            yield OptionList(*self.choices, id="rule-options")
+            yield Static("[dim]Tab / ↑↓ move · Enter select · Esc cancel[/]")
+            if self.note:
+                yield Static(Text(self.note, style="dim"))
 
-    @on(Button.Pressed)
-    def _pressed(self, event: Button.Pressed) -> None:
-        self.dismiss({"exact": self.domain,
-                      "parent": self.parent_domain}.get(event.button.id))
+    def on_mount(self) -> None:
+        options = self.query_one(OptionList)
+        options.highlighted = 0
+        options.focus()
+
+    def action_next_scope(self) -> None:
+        self.query_one(OptionList).action_cursor_down()
+
+    def action_previous_scope(self) -> None:
+        self.query_one(OptionList).action_cursor_up()
+
+    @on(OptionList.OptionSelected)
+    def _selected(self, event: OptionList.OptionSelected) -> None:
+        event.stop()
+        self.dismiss(event.option_id)
 
     def action_cancel(self) -> None:
         self.dismiss(None)
+
+
+class ScopeScreen(_RuleChoice):
+    def __init__(self, scopes, managed) -> None:
+        options = []
+        for scope in scopes:
+            cover = covering_domain(scope, managed)
+            suffix = (" · already added" if cover == scope else
+                      f" · covered by +.{cover}" if cover else "")
+            options.append(Option(f"+.{scope}{suffix}", id=scope))
+        super().__init__("Choose a domain suffix", options,
+                         "Each option covers the named domain and its subdomains.")
+
+
+class RouteScreen(_RuleChoice):
+    def __init__(self, domain, target, *, current=None) -> None:
+        self.highlight = 1 if target and current == target else 0
+        choices = [Option("DIRECT", id="direct")]
+        if target and target != "DIRECT":
+            choices.append(Option(Text(f"{target} (MATCH target)"), id="match"))
+        prompt = f"Choose the outbound for +.{domain}"
+        if current is not None:
+            prompt += f" (current: {current})"
+        super().__init__(prompt, choices,
+                         "The selected outbound is saved to the draft only.")
+
+    def on_mount(self) -> None:
+        super().on_mount()
+        self.query_one(OptionList).highlighted = self.highlight
 
 
 class ControllerScreen(ModalScreen):
@@ -188,16 +241,20 @@ class LiveScreen(ModalScreen):
     #live-help { height: 1; color: $text-muted; }
     """
 
-    FILTERS = ("all", "fail", "live")
-    FILTER_LABEL = {"all": "all", "fail": "failed only", "live": "open only"}
+    FILTERS = ("all", "fail", "live", "new", "unmanaged")
+    FILTER_LABEL = {"all": "all", "fail": "failed only", "live": "open only",
+                    "new": "new open only", "unmanaged": "open, not added"}
 
-    def __init__(self, load_connections, failures, controller_hint=None) -> None:
+    def __init__(self, load_connections, failures, controller_hint=None, managed=()) -> None:
         super().__init__()
         self._load = load_connections
         self._failures = failures
         self._hint = controller_hint or (lambda: "")
         self._active = []
+        self._baseline = None
+        self._managed = frozenset(managed)
         self._rows = []
+        self._last_g = None
         self._filter = "all"
         self._error = None
         self._help = None
@@ -208,13 +265,13 @@ class LiveScreen(ModalScreen):
             yield Static("open connections · failed dials (this run + recorded)",
                          id="live-title")
             yield DataTable(id="live-table")
-            yield Static("Enter add · j/k move · f filter · Esc close", id="live-help")
+            yield Static("Enter add · j/k move · gg/G jump · f filter · Esc close", id="live-help")
 
     def on_mount(self) -> None:
         table = self.query_one("#live-table", DataTable)
         table.cursor_type = "row"
         table.zebra_stripes = True
-        table.add_columns("state", "host", "port", "rule", "out", "n", "when")
+        table.add_columns("state", "host", "port", "rule", "out", "n", "when", "managed")
         table.focus()
         self._help = self.query_one("#live-help", Static)
         self._fill()
@@ -247,6 +304,9 @@ class LiveScreen(ModalScreen):
             self._error = event.error
         else:
             self._active = event.rows or []
+            if self._baseline is None:
+                self._baseline = {conn.get("id") for conn in self._active
+                                  if isinstance(conn, dict) and conn.get("id")}
             self._error = None
         self._fill()
 
@@ -281,23 +341,40 @@ class LiveScreen(ModalScreen):
                              "out": failure.get("outbound") or "-",
                              "n": str(failure.get("count", 1)),
                              "when": failure.get("time") or ""})
-        if self._filter in ("all", "live"):
-            rows.extend(self._active_rows(self._active))
+        connections = self._active
+        if self._filter == "new":
+            baseline = self._baseline or set()
+            connections = (conn for conn in connections if isinstance(conn, dict)
+                           and conn.get("id") and conn["id"] not in baseline)
+        elif self._filter == "unmanaged":
+            connections = (conn for conn in connections if isinstance(conn, dict)
+                           and self._unmanaged((conn.get("metadata") or {}).get("host")))
+        if self._filter != "fail":
+            rows.extend(self._active_rows(connections))
         self._rows = rows
         table.clear(columns=False)
         for row in rows:
             style = "bold red" if row["state"] == "FAIL" else "dim"
+            cover = self._cover(row["host"])
+            status = ("added" if cover and cover == row["host"].lower().rstrip(".") else
+                      f"via +.{cover}" if cover else "")
             table.add_row(Text(row["state"], style=style), row["host"], row["port"],
-                          row["rule"], row["out"], row["n"], row.get("when", ""))
+                          row["rule"], row["out"], row["n"], row.get("when", ""), status)
         if rows:
             table.move_cursor(row=min(max(0, keep), len(rows) - 1))
         self._show_help()
+
+    def _cover(self, host):
+        return covering_domain(host.lower().rstrip("."), self._managed)
+
+    def _unmanaged(self, host):
+        return bool(host and host != "?" and not _is_ip(host) and not self._cover(host))
 
     def _show_help(self, text=None) -> None:
         if self._help is None:
             return
         if text is None:
-            text = (f"Enter add · j/k move · f filter: "
+            text = (f"Enter add · j/k move · gg/G jump · f filter: "
                     f"{self.FILTER_LABEL[self._filter]} · Esc close")
             if self._error:
                 text = f"[red]{self._error}[/]"
@@ -314,8 +391,27 @@ class LiveScreen(ModalScreen):
         self._fill()
 
     # ---------- actions ----------
+    def on_key(self, event) -> None:
+        previous_g, self._last_g = self._last_g, None
+        if event.key not in ("g", "G", "shift+g"):
+            return
+        event.stop()
+        event.prevent_default()
+        if not self._rows:
+            return
+        table = self.query_one("#live-table", DataTable)
+        if event.key != "g":
+            table.move_cursor(row=len(self._rows) - 1)
+        else:
+            now = time.monotonic()
+            if previous_g is not None and now - previous_g < 1.0:
+                table.move_cursor(row=0)
+            else:
+                self._last_g = now
+
     @on(DataTable.RowSelected)
     def _selected(self, event: DataTable.RowSelected) -> None:
+        event.stop()
         index = event.cursor_row
         if not 0 <= index < len(self._rows):
             return
@@ -337,7 +433,7 @@ class LiveScreen(ModalScreen):
 
 class LanlockApp(App):
     TITLE = "lanlock"
-    SUB_TITLE = "internal domains stay DIRECT"
+    SUB_TITLE = "domain routing"
 
     CSS = """
     #status { height: 1; padding: 0 1; background: $panel; }
@@ -348,12 +444,13 @@ class LanlockApp(App):
 
     BINDINGS = [
         Binding("a", "focus_add", "add"),
+        Binding("e", "edit_route", "edit"),
         Binding("d", "delete", "delete"),
-        Binding("y", "sync", "sync"),
+        Binding("s", "sync", "sync"),
         Binding("v", "verify", "verify"),
         Binding("t", "test_dns", "test"),
         Binding("w", "apply", "apply"),
-        Binding("s", "save", "save"),
+        Binding("ctrl+s", "save", "save only", show=False),
         Binding("r", "reload", "reload"),
         Binding("c", "controller", "controller"),
         Binding("l", "live", "live"),
@@ -373,6 +470,8 @@ class LanlockApp(App):
         # UI-thread state: the buffer, the last text known to be on disk, and
         # the snapshot of the one in-flight apply (None when idle).
         self._saved_text = self.text
+        # The last editor snapshot accepted by apply, initialized from disk.
+        self._submitted_text = self.text
         self._apply_text = None
         # Bumped whenever the edited rows or the generated config may have
         # changed; a verify worker only lands if its token still matches.
@@ -402,6 +501,20 @@ class LanlockApp(App):
     def applying(self) -> bool:
         return self._apply_text is not None
 
+    def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
+        if len(self.screen_stack) > 1 and action != "quit":
+            return False
+        if action == "apply":
+            return not self.applying and (self.dirty or self.text != self._submitted_text)
+        if action == "sync":
+            return any(_needs_sync(row) for row in self.rows)
+        if action == "edit_route":
+            return bool(self.rows) and isinstance(self.screen.focused, DataTable) and bool(
+                (self._selected_row() or {}).get("rule"))
+        if action == "save":
+            return self.dirty and not self.applying
+        return super().check_action(action, parameters)
+
     def compose(self) -> ComposeResult:
         yield Header()
         yield Static("", id="status")
@@ -415,7 +528,7 @@ class LanlockApp(App):
         self._status_line = self.query_one("#status", Static)
         table.cursor_type = "row"
         table.zebra_stripes = True
-        table.add_columns("domain", "direct rule", "fake-ip-filter", "live")
+        table.add_columns("domain", "outbound", "fake-ip-filter", "live")
         self.fill_table()
         table.focus()
         if not self.rows:
@@ -424,9 +537,6 @@ class LanlockApp(App):
         self._load_history()
         self._request_status_refresh()
         self._watch_logs()
-        self.log_write("[dim]a add · d delete · y sync rule/filter · v verify · t dns · "
-                       "w apply · s save · r reload · l live · c controller · "
-                       "j/k move · q quit[/]")
 
     def on_unmount(self) -> None:
         self._logs_stop.set()
@@ -454,15 +564,16 @@ class LanlockApp(App):
                 state += " [bold red]DIRTY[/]"
         else:
             state = "[bold red]DIRTY[/]" if self.dirty else "saved"
-        leaks = sum(1 for v in self.audit.values() if v[0] == "LEAK")
-        verified = f"   leaks: [bold red]{leaks}[/]" if self.audit else ""
-        unsynced = sum(1 for r in self.rows if r["rule"] != r["filter"])
+        errors = sum(1 for v in self.audit.values() if v[0] in ("LEAK", "MISMATCH"))
+        verified = f"   route warnings: [bold red]{errors}[/]" if errors else ""
+        unsynced = sum(_needs_sync(r) for r in self.rows)
         synced = f"   unsynced: [yellow]{unsynced}[/]" if unsynced else ""
         failed = "   status: [yellow]lookup failed[/]" if self._status_error else ""
         rules = f"   rules: {self.rules_total}" if self.rules_total is not None else ""
         self._status_line.update(
             f"profile: {prof}   controller: {controller}   "
             f"file: {self.cfg.override}   {state}{rules}{verified}{synced}{failed}")
+        self.screen_stack[0].refresh_bindings()
 
     def _request_status_refresh(self) -> None:
         """Queue a fresh external-status lookup, coalescing pending ones."""
@@ -619,10 +730,14 @@ class LanlockApp(App):
         if self.cfg.controller_state() != "ready":
             self.log_write(f"[yellow]no live controller:[/] {hint()}")
         self.push_screen(LiveScreen(self.cfg.live_connections, self._failure_rows,
-                                    controller_hint=hint), self._live_chosen)
+                                    controller_hint=hint, managed=self._managed_domains()),
+                         self._live_chosen)
 
     def _failure_rows(self):
         return [dict(f) for f in self.failures]
+
+    def _managed_domains(self):
+        return {row["domain"] for row in self.rows if row["rule"]}
 
     def _live_chosen(self, host) -> None:
         if host:
@@ -633,10 +748,6 @@ class LanlockApp(App):
 
     def action_cursor_up(self) -> None:
         self.query_one(DataTable).action_cursor_up()
-
-    def check_action(self, action: str, parameters: tuple):
-        # A modal owns the keys while it is open; only quitting stays global.
-        return len(self.screen_stack) == 1 or action == "quit"
 
     def _invalidate_audit(self) -> None:
         """Drop verdicts and make any in-flight verify result stale."""
@@ -659,20 +770,25 @@ class LanlockApp(App):
         table.clear(columns=False)
         for row in self.rows:
             table.add_row(
-                row["domain"],
-                Text("y", style="green") if row["rule"] else Text("-", style="red"),
+                f"+.{row['domain']}",
+                Text(row["match_target"], style="cyan") if row.get("match_target") else
+                Text("DIRECT", style="green") if row["rule"] else Text("-", style="red"),
                 Text("y", style="green") if row["filter"] else Text("-", style="red"),
                 self._verdict_text(row["domain"]),
             )
         if self.rows:
             table.move_cursor(row=min(keep, len(self.rows) - 1))
 
-    def selected_domain(self):
+    def _selected_row(self):
         table = self.query_one(DataTable)
         if not self.rows:
             return None
         idx = min(max(0, table.cursor_row), len(self.rows) - 1)
-        return self.rows[idx]["domain"]
+        return self.rows[idx]
+
+    def selected_domain(self):
+        row = self._selected_row()
+        return row["domain"] if row else None
 
     # ---------- input ----------
     @on(Input.Submitted, "#add")
@@ -689,24 +805,52 @@ class LanlockApp(App):
         except ValueError as e:
             self.log_write(f"[red]error:[/] {e}")
             return
-        parent = wildcard_parent(raw, domain)
-        if parent is None:
-            self._add_domain(domain)
+        managed = self._managed_domains()
+        scopes = domain_scopes(raw, domain)
+        if len(scopes) == 1:
+            self._scope_chosen(domain)
             return
-        self.push_screen(ScopeScreen(domain, parent), self._scope_chosen)
+        self.push_screen(ScopeScreen(scopes, managed), self._scope_chosen)
 
     def _scope_chosen(self, choice) -> None:
-        if choice:
-            self._add_domain(choice)
+        if not choice:
+            return
+        if any(r["domain"] == choice and r.get("match_target") for r in self.rows):
+            self.log_write(f"[yellow]already added[/] +.{choice}")
+            return
+        try:
+            target = self.cfg.match_target(self.text)
+        except (ValueError, OSError, RuntimeError) as e:
+            self.log_write(f"[red]error:[/] {e}")
+            return
+        if target and target != "DIRECT" and choice not in self._managed_domains():
+            self.push_screen(RouteScreen(choice, target),
+                             lambda route: self._route_chosen(choice, route, target))
+        else:
+            self._route_chosen(choice, "direct", None)
 
-    def _add_domain(self, raw: str) -> None:
+    def _route_chosen(self, domain, route, target) -> None:
+        if route is None:
+            return
+        cover = covering_domain(domain, self._managed_domains())
+        if cover and cover != domain:
+            row = next(row for row in self.rows if row["domain"] == cover)
+            if row.get("match_target") == (target if route == "match" else None):
+                self.log_write(f"[yellow]+.{domain} is already covered by +.{cover}[/]")
+                return
+        self._add_domain(domain, match_target=target if route == "match" else None)
+
+    def _add_domain(self, raw: str, *, match_target=None) -> None:
         try:
             d = norm(raw)
         except ValueError as e:
             self.log_write(f"[red]error:[/] {e}")
             return
         try:
-            new_text, changed = self.cfg.add(d, self.text)
+            if match_target:
+                new_text, changed = self.cfg.add_match(d, self.text, target=match_target)
+            else:
+                new_text, changed = self.cfg.add(d, self.text)
             new_rows = self.cfg.rows(new_text)
         except (ValueError, OSError, RuntimeError) as e:
             self.log_write(f"[red]error:[/] {e}")
@@ -716,9 +860,14 @@ class LanlockApp(App):
             self._invalidate_audit()
         self.fill_table()
         self.refresh_status()
-        self.log_write(f"{'[green]added[/]' if changed else '[yellow]present[/]'} {d}")
+        self.log_write(f"{'[green]added[/]' if changed else '[yellow]already added[/]'} "
+                       f"+.{d} → {escape(match_target or 'DIRECT')}")
 
-    @on(DataTable.RowSelected)
+    @on(DataTable.RowHighlighted, "#table")
+    def _refresh_edit_binding(self) -> None:
+        self.screen_stack[0].refresh_bindings()
+
+    @on(DataTable.RowSelected, "#table")
     def row_selected(self) -> None:
         self.query_one(Input).focus()
 
@@ -731,6 +880,42 @@ class LanlockApp(App):
         if inp.has_focus:
             inp.value = ""
             self.query_one(DataTable).focus()
+
+    def action_edit_route(self) -> None:
+        row = self._selected_row()
+        if not row or not row["rule"]:
+            return
+        domain = row["domain"]
+        current = row.get("match_target", "DIRECT")
+        try:
+            target = self.cfg.match_target(self.text)
+        except (ValueError, OSError, RuntimeError) as e:
+            self.log_write(f"[red]error:[/] {e}")
+            return
+        if not target or target == "DIRECT":
+            if current == "DIRECT":
+                self.log_write("[dim]No non-DIRECT MATCH target in the editable rules.[/]")
+                return
+        self.push_screen(RouteScreen(domain, target, current=current),
+                         lambda choice: self._edit_route_chosen(domain, choice, target))
+
+    def _edit_route_chosen(self, domain, choice, target) -> None:
+        if choice is None:
+            return
+        outbound = target if choice == "match" else "DIRECT"
+        try:
+            text, changed = self.cfg.set_outbound(domain, self.text, target=outbound)
+            if not changed:
+                return
+            rows = self.cfg.rows(text)
+        except (ValueError, OSError, RuntimeError) as e:
+            self.log_write(f"[red]error:[/] {e}")
+            return
+        self.text, self.rows = text, rows
+        self._invalidate_audit()
+        self.fill_table()
+        self.refresh_status()
+        self.log_write(f"[green]updated[/] +.{domain} → {escape(outbound)}")
 
     def action_delete(self) -> None:
         d = self.selected_domain()
@@ -747,7 +932,7 @@ class LanlockApp(App):
             self._invalidate_audit()
         self.fill_table()
         self.refresh_status()
-        self.log_write(f"[yellow]deleted[/] {d} (press w to apply)")
+        self.log_write(f"[yellow]deleted[/] +.{d}")
 
     def action_sync(self) -> None:
         try:
@@ -764,7 +949,7 @@ class LanlockApp(App):
         self.fill_table()
         self.refresh_status()
         for d, kind in added:
-            self.log_write(f"[cyan]+{kind}[/] {d}   (press w to apply)")
+            self.log_write(f"[cyan]+{kind}[/] +.{d}")
 
     def action_test_dns(self) -> None:
         d = self.selected_domain()
@@ -796,7 +981,7 @@ class LanlockApp(App):
             return
         self._saved_text = text
         self.refresh_status()
-        self.log_write("[green]saved[/] override (backup .bak); press w to apply")
+        self.log_write("[green]saved[/] override (backup .bak)")
 
     def action_reload(self) -> None:
         if self.applying:
@@ -867,6 +1052,8 @@ class LanlockApp(App):
         self.refresh_status()
 
     def _apply_finished(self, ok: bool, error) -> None:
+        if ok:
+            self._submitted_text = self._apply_text
         self._apply_text = None
         if error is not None:
             self.log_write(f"[red]apply FAILED:[/] {error} — override saved, but the "
@@ -896,15 +1083,15 @@ class LanlockApp(App):
         rows = [r["domain"] for r in self.rows]
         self.fill_table()
         self._request_status_refresh()
-        self._verify_worker(rows, token)
+        self._verify_worker(rows, token, self.text)
 
     @work(thread=True, exclusive=True, group="verify")
-    def _verify_worker(self, rows, token: int) -> None:
+    def _verify_worker(self, rows, token: int, text: str) -> None:
         self.call_from_thread(self.log_write,
                               "[b]verifying[/] one probe per domain, reading the rule actually used")
         try:
             results = self.cfg.audit(log=lambda m: self.call_from_thread(self.log_write, m),
-                                     domains=rows)
+                                     domains=rows, text=text)
         except Exception as e:
             self.call_from_thread(self._verify_failed, token, str(e))
             return

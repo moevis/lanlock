@@ -247,12 +247,20 @@ def norm(raw):
     return domain
 
 
-def _rule_domain(entry):
+_MATCH_MARKER = "# lanlock: match-target"
+
+
+def _suffix_rule(entry):
     parts = [part.strip() for part in entry.split(",")]
-    if len(parts) in (3, 4) and parts[0] == "DOMAIN-SUFFIX" and parts[2] == "DIRECT":
-        if len(parts) == 3 or parts[3] == "no-resolve":
-            return _suffix(parts[1])
-    return None
+    if (len(parts) == 3 or len(parts) == 4 and parts[3] == "no-resolve") and (
+            parts[0] == "DOMAIN-SUFFIX"):
+        return _suffix(parts[1]), parts[2]
+    return None, None
+
+
+def _rule_domain(entry):
+    domain, target = _suffix_rule(entry)
+    return domain if target == "DIRECT" else None
 
 
 def _filter_domain(entry):
@@ -363,6 +371,8 @@ class _Override:
         self._has_filters = "fake-ip-filter" in self.dns
         self.policy = _section(self.dns, "nameserver-policy", CommentedMap)
         self.rule_domains = self._domains(self.rules, _rule_domain)
+        self.match_rules = dict(rule for i in range(len(self.rules))
+                                if (rule := self._marked_match_rule(i)))
         self.filter_domains = (self._domains(self.filters, _filter_domain)
                                if self._filter_mode() == "blacklist" else set())
 
@@ -370,9 +380,33 @@ class _Override:
     def _domains(entries, parse):
         return {domain for entry in entries if (domain := parse(entry)) is not None}
 
+    def _marked_match_rule(self, index):
+        comment = self.rules.ca.items.get(index)
+        if comment and comment[0] and comment[0].value.split("\n", 1)[0].rstrip().endswith(_MATCH_MARKER):
+            domain, target = _suffix_rule(self.rules[index])
+            if domain and target and target != "DIRECT":
+                return domain, target
+
     def rows(self):
-        return [{"domain": d, "rule": d in self.rule_domains, "filter": d in self.filter_domains}
-                for d in sorted(self.rule_domains | self.filter_domains)]
+        rows = []
+        for d in sorted(self.rule_domains | self.filter_domains | self.match_rules.keys()):
+            row = {"domain": d, "rule": d in self.rule_domains or d in self.match_rules,
+                   "filter": d in self.filter_domains}
+            if d in self.match_rules:
+                row["match_target"] = self.match_rules[d]
+            rows.append(row)
+        return rows
+
+    def match_target(self):
+        for entry in self.rules:
+            kind, _, target = entry.partition(",")
+            if kind.strip() == "MATCH":
+                target = target.strip()
+                return target if target and "," not in target else None
+        return None
+
+    def has_suffix_rule(self, domain, target):
+        return any(_suffix_rule(entry) == (domain, target) for entry in self.rules)
 
     def _filter_mode(self):
         """The effective mode, including the backend's own baseline when unset."""
@@ -386,13 +420,86 @@ class _Override:
     def add_rule(self, domain):
         if domain in self.rule_domains:
             return False
+        if domain in self.match_rules:
+            raise ValueError(f"+.{domain} already has a MATCH-target rule; remove it first")
         self._require_section("rules")
         _require_editable(self.root, self.rules)
-        position = next((i for i, entry in enumerate(self.rules)
-                         if entry.split(",", 1)[0].strip() in _LATE_RULES), len(self.rules))
+        position = len(self.rules)
+        for i, entry in enumerate(self.rules):
+            suffix, _ = _suffix_rule(entry)
+            if (entry.split(",", 1)[0].strip() in _LATE_RULES or
+                    suffix in self.match_rules and domain.endswith("." + suffix)):
+                position = i
+                break
         self.rules.insert(position, f"DOMAIN-SUFFIX,{domain},DIRECT")
         self.root["rules"] = self.rules
         self.rule_domains.add(domain)
+        return True
+
+    def add_match_rule(self, domain, target):
+        if self.match_rules.get(domain) == target:
+            return False
+        position = len(self.rules)
+        for i, entry in enumerate(self.rules):
+            kind = entry.split(",", 1)[0].strip()
+            suffix, _ = _suffix_rule(entry)
+            if suffix == domain:
+                raise ValueError(f"+.{domain} already has a suffix rule; remove it first")
+            if position == len(self.rules) and (
+                    kind not in ("DOMAIN", "DOMAIN-SUFFIX") or
+                    suffix and domain.endswith("." + suffix)):
+                position = i
+            specific = suffix
+            if kind == "DOMAIN":
+                specific = _suffix(entry.split(",", 2)[1].strip()) if "," in entry else None
+            if i >= position and specific and specific.endswith("." + domain):
+                raise ValueError(f"+.{domain} would shadow the more specific {specific} rule")
+        self._require_section("rules")
+        _require_editable(self.root, self.rules)
+        self.rules.fa.set_block_style()
+        self.rules.insert(position, f"DOMAIN-SUFFIX,{domain},{target}")
+        self.rules.yaml_add_eol_comment(_MATCH_MARKER, key=position)
+        self.root["rules"] = self.rules
+        return True
+
+    def set_rule_target(self, domain, target):
+        """Replace one managed suffix in place, keeping its precedence and comments."""
+        indices = [i for i, entry in enumerate(self.rules) if _suffix_rule(entry)[0] == domain]
+        if not indices or domain not in (self.rule_domains | self.match_rules.keys()):
+            raise ValueError(f"no managed rule for +.{domain}")
+        if len(indices) != 1:
+            raise ValueError(f"multiple suffix rules for +.{domain}; resolve them before editing")
+        index = indices[0]
+        entry = self.rules[index]
+        _, previous = _suffix_rule(entry)
+        if previous == target:
+            return False
+        _require_editable(self.root, self.rules)
+        parts = entry.split(",")
+        parts[2] = parts[2].replace(previous, target, 1)
+        self.rules[index] = ",".join(parts)
+
+        comment = self.rules.ca.items.get(index)
+        token = comment[0] if comment else None
+        if token is not None:
+            first, sep, rest = token.value.partition("\n")
+            first = first.rstrip().removesuffix(_MATCH_MARKER).rstrip()
+            if target != "DIRECT":
+                first = f"{first} {_MATCH_MARKER}" if first else _MATCH_MARKER
+            token.value = first + sep + rest
+            if not token.value.strip():
+                comment[0] = None
+        elif target != "DIRECT":
+            self.rules.fa.set_block_style()
+            self.rules.yaml_add_eol_comment(_MATCH_MARKER, key=index)
+        return True
+
+    def remove_filter(self, domain):
+        if domain not in self.filter_domains:
+            return False
+        self._edit_filters()
+        self._remove_matching(self.filters, _filter_domain, domain)
+        self.filter_domains.remove(domain)
         return True
 
     def add_filter(self, domain):
@@ -474,16 +581,19 @@ class _Override:
         self.root["dns"] = self.dns
 
     def remove(self, domain):
+        if domain in self.match_rules:
+            _require_editable(self.root, self.rules)
+            for i in reversed(range(len(self.rules))):
+                marked = self._marked_match_rule(i)
+                if marked and marked[0] == domain:
+                    del self.rules[i]
+            return True
         changed = False
         if domain in self.rule_domains:
             _require_editable(self.root, self.rules)
             self._remove_matching(self.rules, _rule_domain, domain)
             changed = True
-        if domain in self.filter_domains:
-            self._edit_filters()
-            self._remove_matching(self.filters, _filter_domain, domain)
-            changed = True
-        return changed
+        return self.remove_filter(domain) or changed
 
     @staticmethod
     def _remove_matching(entries, parse, domain):
@@ -710,7 +820,7 @@ class MihomoConfig:
                 return f"{action},{content}"
         return None
 
-    def _flclash_edit_guard(self, domain=None):
+    def _flclash_edit_guard(self, domain=None, *, edits_dns=True):
         """Refuse edits that FlClash's own settings would shadow or already make."""
         if not self.flclash:
             return
@@ -721,7 +831,7 @@ class MihomoConfig:
                 "of a local profile. Export it as a file profile (or change it in "
                 "FlClash's editor) first")
         clashes = [key for key in self._EDITED_DNS_KEYS if key in self._dns_override_keys(row)]
-        if clashes:
+        if edits_dns and clashes:
             raise ValueError(
                 f"{self._flclash_label(row)} overrides {', '.join(clashes)} in FlClash's own "
                 "settings, which replace the profile's values; clear that override first")
@@ -812,6 +922,43 @@ class MihomoConfig:
                              seed_filter_mode=seed_mode)
         return _Override(self.read() if text is None else text)
 
+    def match_target(self, text=None):
+        """Return the first catch-all target in the editable rules."""
+        return self._override(text).match_target()
+
+    def add_match(self, domain, text=None, *, target):
+        """Pin this suffix to the fallback target without changing DNS."""
+        domain = norm(domain)
+        self._flclash_edit_guard(domain, edits_dns=False)
+        config = self._override(text)
+        fallback = config.match_target()
+        if not fallback or fallback == "DIRECT" or target != fallback:
+            raise ValueError("no matching non-DIRECT MATCH target in the editable rules")
+        changed = config.add_match_rule(domain, target)
+        return config.render(changed), changed
+
+    def set_outbound(self, domain, text=None, *, target):
+        """Switch an existing managed rule between DIRECT and the MATCH target."""
+        domain = norm(domain)
+        config = self._override(text)
+        previous = config.match_rules.get(domain, "DIRECT")
+        if not target or target not in ("DIRECT", previous, config.match_target()):
+            raise ValueError("no matching non-DIRECT MATCH target in the editable rules")
+        if not config.set_rule_target(domain, target):
+            return config.render(False), False
+
+        edits_dns = target == "DIRECT" or previous == "DIRECT"
+        self._flclash_edit_guard(domain, edits_dns=edits_dns)
+        if target == "DIRECT":
+            config.add_filter(domain)
+            if self.flclash:
+                config.add_policy(domain, [self.resolver])
+        elif previous == "DIRECT":
+            config.remove_filter(domain)
+            if self.flclash:
+                config.remove_policy(domain, [self.resolver])
+        return config.render(True), True
+
     def add_rule_only(self, text, domain):
         self._flclash_edit_guard(norm(domain))
         config = self._override(text)
@@ -843,10 +990,11 @@ class MihomoConfig:
 
     def remove(self, domain, text=None):
         domain = norm(domain)
-        self._flclash_edit_guard(domain)
         config = self._override(text)
+        match_rule = domain in config.match_rules
+        self._flclash_edit_guard(domain, edits_dns=not match_rule)
         changed = config.remove(domain)
-        if self.flclash:
+        if self.flclash and not match_rule:
             changed = config.remove_policy(domain, [self.resolver]) or changed
         return config.render(changed), changed
 
@@ -862,6 +1010,8 @@ class MihomoConfig:
         config = self._override(text)
         added = []
         for row in config.rows():
+            if row.get("match_target"):
+                continue
             domain = row["domain"]
             if not row["filter"]:
                 config.add_filter(domain)
@@ -1024,12 +1174,17 @@ class MihomoConfig:
             if generated is None:
                 raise OSError(f"generated configuration not found: {self.generated}")
             networks = self.fake_ip_networks(generated)
-            domains = [r["domain"] for r in self.rows()] if domains is None else domains
+            document = self._override()
+            domains = [r["domain"] for r in document.rows()] if domains is None else domains
         except (OSError, ValueError) as e:
             log(f"error: cannot read configuration: {e}")
             return False
         log("config: reloaded via Mihomo API")
         for d in domains:
+            if target := document.match_rules.get(d):
+                present = generated.has_suffix_rule(d, target)
+                log(f"  {d}  rule={'y' if present else 'n'} target={target}")
+                continue
             ip, state = dns_check_retry(d, networks=networks)
             has_rule = d in generated.rule_domains
             has_filter = d in generated.filter_domains
@@ -1062,6 +1217,9 @@ class MihomoConfig:
             return False
         log(f"file: {self.override}")
         for d in domains:
+            if target := document.match_rules.get(d):
+                log(f"  {d}  rule=y target={target}")
+                continue
             log("  %-36s rule=%s filter=%s policy=%s" % (
                 d, "y" if d in document.rule_domains else "n",
                 "y" if d in document.filter_domains else "n",
@@ -1076,18 +1234,21 @@ class MihomoConfig:
 
     def probe(self, domain, port=443):
         from .probe import probe
+        target = self._override().match_rules.get(domain)
         return probe(domain, api=self.api, port=port,
                      networks=self.fake_ip_networks(),
-                     secret=self.secret or None)
+                     secret=self.secret or None, match_target=target)
 
-    def audit(self, log=print, domains=None):
+    def audit(self, log=print, domains=None, *, text=None):
         from .probe import audit
-        domains = [r["domain"] for r in self.rows()] if domains is None else domains
+        document = self._override(text)
+        domains = [r["domain"] for r in document.rows()] if domains is None else domains
         if self.flclash and self.controller_state() != "ready":
             log("note: no Mihomo controller, so verdicts come from DNS alone "
                 "(pass --api once FlClash exposes one)")
         return audit(domains, api=self.api, log=log,
-                     networks=self.fake_ip_networks(), secret=self.secret or None)
+                     networks=self.fake_ip_networks(), secret=self.secret or None,
+                     match_targets=document.match_rules)
 
 
 def dns_check(domain, *, networks=None):

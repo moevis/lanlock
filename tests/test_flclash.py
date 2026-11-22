@@ -180,6 +180,19 @@ def test_add_writes_rule_filter_and_policy(cfg):
     assert cfg.add("corp.example", text) == (text, False)
 
 
+def test_edit_outbound_removes_only_default_policy_and_restores_direct_dns(cfg):
+    direct, _ = cfg.add("corp.example")
+    pinned, _ = cfg.set_outbound("corp.example", direct, target="PROXY")
+    assert _load(pinned)["dns"]["fake-ip-filter"] == DEFAULTS
+    assert "nameserver-policy" not in _load(pinned)["dns"]
+    restored, _ = cfg.set_outbound("corp.example", pinned, target="DIRECT")
+    assert _load(restored) == _load(direct)
+
+    custom = direct.replace("system://", "10.0.0.53")
+    pinned, _ = cfg.set_outbound("corp.example", custom, target="PROXY")
+    assert _load(pinned)["dns"]["nameserver-policy"] == {"+.corp.example": ["10.0.0.53"]}
+
+
 def test_existing_dns_section_without_a_filter_list_is_seeded(cfg):
     text = "rules:\n  - MATCH,PROXY\ndns:\n  enable: true\n"
     text, changed = cfg.add("corp.example", text)
@@ -282,6 +295,18 @@ def test_apply_reports_saved_but_not_applied(cfg, monkeypatch):
     assert "rule=y filter=y policy=y" in output
     assert "saved, NOT applied" in output
     assert "dns=" not in output
+
+
+def test_apply_match_target_preserves_flclash_dns(cfg):
+    text, changed = cfg.add_match("corp.example", target="PROXY")
+    assert changed
+    assert _load(text).get("dns") == _load(PROFILE).get("dns")
+    cfg.save(text, expect=PROFILE)
+    lines = []
+    assert cfg.apply(log=lines.append)
+    assert "corp.example  rule=y target=PROXY" in "\n".join(lines)
+    assert "saved, NOT applied" in "\n".join(lines)
+
 
 
 def test_apply_warns_when_the_edited_profile_is_not_the_selected_one(cfg, macos_home):

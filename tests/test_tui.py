@@ -13,11 +13,11 @@ import pytest
 pytest.importorskip("textual")
 
 
-from lanlock import cli  # noqa: E402
+from lanlock import MihomoConfig, cli  # noqa: E402
 from lanlock.tui import (  # noqa: E402
-    ControllerScreen, FailureSeen, LanlockApp, LiveScreen, ScopeScreen,
-    main as tui_main, wildcard_parent)
-from textual.widgets import DataTable, Input, Static  # noqa: E402
+    ConnectionsLoaded, ControllerScreen, FailureSeen, LanlockApp, LiveScreen,
+    RouteScreen, ScopeScreen, domain_scopes, main as tui_main)
+from textual.widgets import DataTable, Input, OptionList, Static  # noqa: E402
 
 BASE_TEXT = """\
 rules:
@@ -150,6 +150,9 @@ class FakeConfig:
                         (row["domain"], "filter" if row["rule"] else "rule"))
         return text, added
 
+    def match_target(self, text=None):
+        return None
+
     def active_profile(self):
         self.status_calls += 1
         self.status_started.set()
@@ -195,7 +198,7 @@ class FakeConfig:
             raise self.apply_error
         return self.apply_result
 
-    def audit(self, log=print, domains=None):
+    def audit(self, log=print, domains=None, *, text=None):
         self.audit_calls += 1
         self.audit_domains.append(list(domains or []))
         self.audit_started.set()
@@ -536,6 +539,31 @@ def test_clean_save_and_apply_do_not_rewrite_override():
     asyncio.run(scenario())
 
 
+def test_sync_and_apply_bindings_track_available_work():
+    async def scenario():
+        cfg = FakeConfig(BASE_TEXT.replace("    - '+.corp.example'", "    - '+.other.example'"),
+                         block_apply=True)
+        app = Harness(cfg)
+        async with app.run_test() as pilot:
+            assert "s" in app.screen.active_bindings
+            assert "w" not in app.screen.active_bindings
+            await pilot.press("s")
+            assert all(row["rule"] and row["filter"] for row in app.rows)
+            assert "s" not in app.screen.active_bindings
+            assert "w" in app.screen.active_bindings
+
+            await pilot.press("ctrl+s")
+            assert not app.dirty
+            assert "w" in app.screen.active_bindings  # saved but not applied
+            await pilot.press("w")
+            await _wait_event(cfg.apply_started)
+            assert "w" not in app.screen.active_bindings
+            cfg.apply_release.set()
+            await _wait_event(app.apply_done)
+            assert "w" not in app.screen.active_bindings
+    asyncio.run(scenario())
+
+
 def test_edit_error_leaves_state_untouched():
     async def scenario():
         cfg = FakeConfig()
@@ -567,13 +595,11 @@ def test_dns_configuration_error_is_reported_in_tui(monkeypatch):
     asyncio.run(scenario())
 
 
-def test_wildcard_parent_only_offers_a_real_parent():
-    assert wildcard_parent("aaa.bbb.cc", "aaa.bbb.cc") == "bbb.cc"
-    assert wildcard_parent("www.corp.example", "www.corp.example") == "corp.example"
-    assert wildcard_parent("corp.example", "corp.example") is None
-    assert wildcard_parent("*.aaa.bbb.cc", "aaa.bbb.cc") is None
-    assert wildcard_parent("+.aaa.bbb.cc", "aaa.bbb.cc") is None
-    assert wildcard_parent(".aaa.bbb.cc", "aaa.bbb.cc") is None
+def test_domain_scopes_exclude_bare_top_level_and_honor_explicit_suffix():
+    assert domain_scopes("aa.bb.cc.dd", "aa.bb.cc.dd") == [
+        "aa.bb.cc.dd", "bb.cc.dd", "cc.dd"]
+    for prefix in ("*.", "+.", "."):
+        assert domain_scopes(prefix + "aa.bb.cc.dd", "aa.bb.cc.dd") == ["aa.bb.cc.dd"]
 
 
 def _two_domains():
@@ -601,16 +627,14 @@ def test_jk_moves_the_table_but_types_in_the_input():
     asyncio.run(scenario())
 
 
-def test_add_asks_for_the_host_or_its_parent():
+def test_add_can_choose_grandparent_suffix():
     async def scenario():
         app = Harness(FakeConfig())
         async with app.run_test() as pilot:
             await pilot.press("a")
-            await pilot.press(*"aaa.bbb.cc")
+            await pilot.press(*"aa.bb.cc.dd")
             await pilot.press("enter")
             assert isinstance(app.screen, ScopeScreen)
-            assert app.screen.domain == "aaa.bbb.cc"
-            assert app.screen.parent_domain == "bbb.cc"
 
             # App-level single-key actions stay out of the modal's way.
             before = app.text
@@ -618,9 +642,10 @@ def test_add_asks_for_the_host_or_its_parent():
             assert isinstance(app.screen, ScopeScreen)
             assert app.text == before
 
-            await pilot.click("#parent")
-            assert "DOMAIN-SUFFIX,bbb.cc,DIRECT" in app.text
-            assert "aaa.bbb.cc" not in app.text
+            await pilot.press("tab", "tab", "shift+tab", "up", "down", "down", "enter")
+            assert "DOMAIN-SUFFIX,cc.dd,DIRECT" in app.text
+            assert "bb.cc.dd" not in app.text
+            assert app.query_one(DataTable).get_row_at(0)[0] == "+.cc.dd"
     asyncio.run(scenario())
 
 
@@ -631,9 +656,44 @@ def test_add_exact_host_from_the_chooser():
             app._request_add("aaa.bbb.cc")
             await pilot.pause()
             assert isinstance(app.screen, ScopeScreen)
-            await pilot.click("#exact")
+            await pilot.press("enter")
             assert "DOMAIN-SUFFIX,aaa.bbb.cc,DIRECT" in app.text
     asyncio.run(scenario())
+
+def test_live_domain_can_pin_the_displayed_match_target_without_sync(tmp_path, monkeypatch):
+    config = MihomoConfig(tmp_path)
+    target = "Proxy group [fallback]"
+    cfg = FakeConfig(BASE_TEXT.replace("MATCH,PROXY", f"MATCH,{target}"))
+    for method in ("rows", "match_target", "add_match", "sync", "remove"):
+        monkeypatch.setattr(cfg, method, getattr(config, method), raising=False)
+    cfg.connections = [{"id": "new", "metadata": {"host": "aa.bb.cc.dd"}}]
+
+    async def scenario():
+        app = Harness(cfg)
+        async with app.run_test() as pilot:
+            await pilot.press("l")
+            for _ in range(100):
+                if isinstance(app.screen, LiveScreen) and app.screen._rows:
+                    break
+                await asyncio.sleep(0.01)
+            await pilot.press("enter", "down", "enter")
+            assert isinstance(app.screen, RouteScreen)
+            option = app.screen.query_one(OptionList).get_option_at_index(1)
+            assert option.prompt.plain == f"{target} (MATCH target)"
+            await pilot.press("tab", "enter", "ctrl+s")
+            assert "s" not in app.screen.active_bindings
+            assert "w" in app.screen.active_bindings
+            saved = cfg.saves[-1]
+            assert f"DOMAIN-SUFFIX,bb.cc.dd,{target}" in saved
+            assert f"MATCH,{target}" in saved
+            assert "'+.bb.cc.dd'" not in saved
+            row = app.query_one(DataTable).get_row_at(0)
+            assert row[0] == "+.bb.cc.dd" and row[1].plain == target
+
+            await pilot.press("d")
+            assert "DOMAIN-SUFFIX,bb.cc.dd" not in app.text
+    asyncio.run(scenario())
+
 
 
 def test_controller_screen_sets_api_and_secret_for_the_session():
@@ -699,9 +759,9 @@ def test_live_screen_explains_an_empty_panel_when_there_is_no_controller():
 def test_live_screen_lists_failures_and_active_connections():
     async def scenario():
         cfg = FakeConfig()
-        cfg.failure_feed.put({"host": "bad.corp.example", "port": 443,
-                              "rule": "DomainSuffix", "payload": "corp.example",
-                              "outbound": "DIRECT", "detail": "dial tcp: timeout"})
+        cfg.failure_feed.put({"host": "bad.other.example", "port": 443,
+                              "rule": "Match", "payload": "",
+                              "outbound": "PROXY", "detail": "dial tcp: timeout"})
         cfg.connections = [
             {"metadata": {"host": "corp.example", "destinationPort": "443"},
              "rule": "DomainSuffix", "rulePayload": "corp.example",
@@ -718,8 +778,8 @@ def test_live_screen_lists_failures_and_active_connections():
             screen = app.screen
             assert isinstance(screen, LiveScreen)
             assert screen._rows[0]["state"] == "FAIL"
-            assert screen._rows[0]["host"] == "bad.corp.example"
-            assert cfg.recorded and cfg.recorded[0]["host"] == "bad.corp.example"
+            assert screen._rows[0]["host"] == "bad.other.example"
+            assert cfg.recorded and cfg.recorded[0]["host"] == "bad.other.example"
             assert screen._rows[1]["state"] == "live"
             assert screen._rows[1]["host"] == "corp.example"
 
@@ -728,10 +788,20 @@ def test_live_screen_lists_failures_and_active_connections():
             await pilot.press("k")
             assert screen.query_one(DataTable).cursor_row == 0
 
+            await pilot.press("G")
+            assert screen.query_one(DataTable).cursor_row == 1
+            await pilot.press("g")
+            assert screen.query_one(DataTable).cursor_row == 1
+            await pilot.press("g")
+            assert screen.query_one(DataTable).cursor_row == 0
+
             await pilot.press("enter")
             assert isinstance(app.screen, ScopeScreen)
-            await pilot.click("#exact")
-            assert "DOMAIN-SUFFIX,bad.corp.example,DIRECT" in app.text
+            await pilot.press("enter")
+            assert "DOMAIN-SUFFIX,bad.other.example,DIRECT" in app.text
+            assert app.query_one(DataTable).has_focus
+            await pilot.press("ctrl+s")
+            assert len(cfg.saves) == 1
     asyncio.run(scenario())
 
 
@@ -811,10 +881,61 @@ def test_live_screen_shows_recorded_failures_and_filters():
             assert [r["state"] for r in screen._rows] == ["FAIL"]
             await pilot.press("f")
             assert [r["state"] for r in screen._rows] == ["live"]
+            await pilot.press("f", "f")
             await pilot.press("f")
             assert {r["state"] for r in screen._rows} == {"FAIL", "live"}
             assert "filter: all" in str(
                 screen.query_one("#live-help", Static).render())
+    asyncio.run(scenario())
+
+
+def test_live_filters_new_connection_ids_and_unmanaged_domains():
+    def connection(id_, host):
+        return {"id": id_, "metadata": {"host": host, "destinationPort": "443"}}
+
+    async def scenario():
+        cfg = FakeConfig()
+        old = connection("old", "same.other.example")
+        cfg.connections = [old]
+        app = Harness(cfg)
+        async with app.run_test() as pilot:
+            await pilot.press("l")
+            for _ in range(100):
+                if isinstance(app.screen, LiveScreen) and app.screen._rows:
+                    break
+                await asyncio.sleep(0.01)
+            screen = app.screen
+            await pilot.press("f", "f", "f")
+            assert not screen._rows
+
+            cfg.connections = [old, connection("new", "same.other.example"),
+                               connection("covered", "child.corp.example"),
+                               connection("ip", "10.0.0.2")]
+            screen.post_message(ConnectionsLoaded(cfg.connections))
+            await pilot.pause()
+            hosts = {row["host"]: row["n"] for row in screen._rows}
+            assert hosts["same.other.example"] == "1"  # same group, new socket only
+            assert "child.corp.example" in hosts
+
+            await pilot.press("f")
+            assert [(row["host"], row["n"]) for row in screen._rows] == [
+                ("same.other.example", "2")]
+    asyncio.run(scenario())
+
+
+def test_covered_domain_is_shown_before_adding_and_not_duplicated():
+    async def scenario():
+        app = Harness(FakeConfig())
+        async with app.run_test() as pilot:
+            before = app.text
+            app._request_add("child.corp.example")
+            await pilot.pause()
+            chooser = app.screen.query_one(OptionList)
+            assert "covered by +.corp.example" in str(chooser.get_option_at_index(0).prompt)
+            assert "already added" in str(chooser.get_option_at_index(1).prompt)
+            await pilot.press("enter")
+            assert "already covered by +.corp.example" in _log(app)
+            assert app.text == before
     asyncio.run(scenario())
 
 

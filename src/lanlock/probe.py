@@ -25,8 +25,8 @@ from concurrent.futures import ThreadPoolExecutor
 
 from .config import DEFAULT_API, dns_check
 
-MATCH_USING = re.compile(r"match (.+?) using (\S+)")
-DIAL_FAILED = re.compile(r"dial (\S+) \(match ([^)]+)\)")
+MATCH_USING = re.compile(r"match (.+?) using (.+)$")
+DIAL_FAILED = re.compile(r"dial (.+?) \(match ([^)]+)\)")
 # The destination token after the connection arrow: host:port, and not a
 # port-prefix of a longer number.
 DESTINATION = re.compile(r"-->\s*([A-Za-z0-9_.-]+):(\d+)(?![\w.:-])")
@@ -329,11 +329,10 @@ def _decision(line, domain, port):
     return _parse_log_line(line)
 
 
-def _api_evidence(domain, port, api=DEFAULT_API, secret=None):
-    """Return (rule, payload, outbound) from /connections, or None.
+def _api_evidence(domain, port, api=DEFAULT_API, secret=None, *, with_target=False):
+    """Read the rule and leaf outbound; optionally return the outermost target.
 
-    An entry whose outbound chain is missing or empty is not evidence: it must
-    fall through to the log stream instead of being reported as a LEAK.
+    An empty chain is not evidence; fall back to the log stream.
     """
     for conn in live_connections(api, secret):
         md = conn.get("metadata") or {}
@@ -343,21 +342,36 @@ def _api_evidence(domain, port, api=DEFAULT_API, secret=None):
         outbound = chains[0] if chains else ""
         if not outbound:
             continue
-        return (conn.get("rule") or "?", conn.get("rulePayload") or "", outbound)
+        evidence = (conn.get("rule") or "?", conn.get("rulePayload") or "", outbound)
+        return (*evidence, chains[-1]) if with_target else evidence
     return None
 
 
-def _result(domain, dns_state, ip, rule, payload, outbound):
+def _result(domain, dns_state, ip, rule, payload, outbound, observed_target=None, *,
+            match_target=None):
     direct = outbound.split("[")[0] == "DIRECT"
     verdict = "ok" if direct else "LEAK"
     if direct and dns_state == "FAKE-IP":
         verdict = "FAKE-IP"
     detail = (f"{rule}({payload})" if payload else str(rule)) + f" -> {outbound}"
+    if match_target:
+        suffix_matched = (rule.lower().replace("-", "") == "domainsuffix"
+                          and payload.lower().rstrip(".") == domain)
+        if not suffix_matched or observed_target is not None and observed_target != match_target:
+            verdict = "MISMATCH"
+        elif observed_target or outbound == match_target or outbound.startswith(match_target + "["):
+            verdict = "ok"
+        else:
+            verdict = "unknown"  # a log entry may show only the selected node
+        detail += f" (expected +.{domain} -> {match_target}"
+        if observed_target and observed_target != outbound:
+            detail += f"; observed target {observed_target}"
+        detail += ")"
     return {"domain": domain, "dns": dns_state, "ip": ip, "verdict": verdict,
             "detail": detail, "rule": rule, "outbound": outbound}
 
 
-def probe(domain, api=DEFAULT_API, port=443, *, networks=None, secret=None):
+def probe(domain, api=DEFAULT_API, port=443, *, networks=None, secret=None, match_target=None):
     """Open one connection and report the newest observed rule decision for it."""
     ip, dns_state = dns_check(domain, networks=networks)
     if dns_state == "no-record":
@@ -374,13 +388,13 @@ def probe(domain, api=DEFAULT_API, port=443, *, networks=None, secret=None):
             pass
         deadline = time.monotonic() + CONNECTION_WINDOW
         while time.monotonic() < deadline:
-            evidence = _api_evidence(domain, port, api, secret)
+            evidence = _api_evidence(domain, port, api, secret, with_target=bool(match_target))
             if evidence:
-                return _result(domain, dns_state, ip, *evidence)
+                return _result(domain, dns_state, ip, *evidence, match_target=match_target)
             time.sleep(CONNECTION_POLL)
         evidence = logs.evidence(time.monotonic() + LOG_WINDOW)
         if evidence:
-            return _result(domain, dns_state, ip, *evidence)
+            return _result(domain, dns_state, ip, *evidence, match_target=match_target)
     finally:
         logs.close()
         if sock is not None:
@@ -388,22 +402,27 @@ def probe(domain, api=DEFAULT_API, port=443, *, networks=None, secret=None):
                 sock.close()
             except OSError:
                 pass
-    verdict = "FAKE-IP" if dns_state == "FAKE-IP" else "unknown"
+    verdict = "FAKE-IP" if not match_target and dns_state == "FAKE-IP" else "unknown"
     return {"domain": domain, "dns": dns_state, "ip": ip, "verdict": verdict,
             "detail": "no rule decision observed", "rule": "-", "outbound": "-"}
 
 
-def audit(domains, api=DEFAULT_API, log=print, *, networks=None, secret=None):
+def audit(domains, api=DEFAULT_API, log=print, *, networks=None, secret=None, match_targets=None):
     """Probe every domain in parallel; log one line each and a summary."""
     workers = min(8, max(1, len(domains)))
+    match_targets = match_targets or {}
     with ThreadPoolExecutor(max_workers=workers) as pool:
         results = list(pool.map(
-            lambda d: probe(d, api, networks=networks, secret=secret), domains))
+            lambda d: probe(d, api, networks=networks, secret=secret,
+                            match_target=match_targets.get(d)), domains))
     for r in results:
         log("  %-36s %-8s dns=%-9s %s" % (r["domain"], r["verdict"], r["dns"], r["detail"]))
-    leaks = [r for r in results if r["verdict"] == "LEAK"]
+    leaks = sum(r["verdict"] == "LEAK" for r in results)
+    mismatches = sum(r["verdict"] == "MISMATCH" for r in results)
     fake = [r for r in results if r["verdict"] == "FAKE-IP"]
     skipped = [r for r in results if r["verdict"] in ("skip", "unknown")]
-    log("audit: %d checked, %d leak, %d fake-ip, %d skip/unknown"
-        % (len(results), len(leaks), len(fake), len(skipped)))
+    summary = f"audit: {len(results)} checked, {leaks} leak, {len(fake)} fake-ip, "
+    if mismatches:
+        summary += f"{mismatches} route mismatch, "
+    log(summary + f"{len(skipped)} skip/unknown")
     return results

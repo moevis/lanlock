@@ -131,6 +131,85 @@ def test_add_edits_only_target_sections_and_preserves_precedence(cfg):
     assert cfg.add("corp.example", text) == (text, False)
 
 
+def test_match_target_round_trip_does_not_manage_dns_or_unrelated_rules(cfg):
+    original = '''rules: ['DOMAIN-SUFFIX,unrelated.example,Group Name', 'MATCH,Group Name']
+dns:
+  fake-ip-filter: ['+.corp.example']
+  nameserver-policy: {'+.corp.example': [system://]}
+'''
+    assert cfg.match_target(original) == "Group Name"
+    text, changed = cfg.add_match("+.corp.example", original, target="Group Name")
+    assert changed
+    before, after = [YAML(typ="safe").load(data) for data in (original, text)]
+    assert after["rules"] == [before["rules"][0], "DOMAIN-SUFFIX,corp.example,Group Name",
+                              before["rules"][1]]
+    assert after["dns"] == before["dns"]
+    assert cfg.rows(text) == [{"domain": "corp.example", "rule": True, "filter": True,
+                               "match_target": "Group Name"}]
+    assert cfg.add_match("corp.example", text, target="Group Name") == (text, False)
+    assert cfg.sync(text) == (text, [])
+    with pytest.raises(ValueError, match="remove it first"):
+        cfg.add("corp.example", text)
+    removed, changed = cfg.remove("corp.example", text)
+    assert changed
+    assert YAML(typ="safe").load(removed) == before
+
+
+def test_edit_outbound_keeps_rule_order_options_and_comments(cfg):
+    original = '''rules:
+  - DOMAIN,child.example,REJECT
+  - 'DOMAIN-SUFFIX,Example, DIRECT,no-resolve' # local routing note
+  # Keep this note on the following rules.
+  - GEOSITE,private,DIRECT
+  - MATCH,Proxy Group
+dns:
+  fake-ip-filter: ['+.example', '+.unrelated.example']
+'''
+    pinned, changed = cfg.set_outbound("+.example", original, target="Proxy Group")
+    assert changed
+    parsed = YAML(typ="safe").load(pinned)
+    assert parsed["rules"] == ["DOMAIN,child.example,REJECT",
+                               "DOMAIN-SUFFIX,Example, Proxy Group,no-resolve",
+                               "GEOSITE,private,DIRECT", "MATCH,Proxy Group"]
+    assert parsed["dns"]["fake-ip-filter"] == ["+.unrelated.example"]
+    assert next(row for row in cfg.rows(pinned) if row["domain"] == "example")["match_target"] == "Proxy Group"
+    restored, changed = cfg.set_outbound("example", pinned, target="DIRECT")
+    assert changed
+    before, after = [YAML(typ="safe").load(s) for s in (original, restored)]
+    assert before["rules"] == after["rules"]
+    assert set(before["dns"]["fake-ip-filter"]) == set(after["dns"]["fake-ip-filter"])
+    assert "# local routing note" in restored and "# Keep this note" in restored
+    assert "# lanlock: match-target" not in restored
+
+
+def test_edit_outbound_refuses_ambiguous_rules(cfg):
+    text = "rules: ['DOMAIN-SUFFIX,x.example,DIRECT', 'DOMAIN-SUFFIX,x.example,PROXY', 'MATCH,PROXY']\n"
+    with pytest.raises(ValueError, match="multiple suffix rules"):
+        cfg.set_outbound("x.example", text, target="PROXY")
+
+
+def test_match_target_has_precedence_without_shadowing_known_specific_rules(cfg):
+    original = '''rules:
+  - DOMAIN-SUFFIX,corp.example,DIRECT
+  - RULE-SET,coursework,DIRECT
+  - DOMAIN-SUFFIX,special.other.example,DIRECT
+  - MATCH,Group
+dns:
+  fake-ip-filter: []
+'''
+    text, _ = cfg.add_match("child.corp.example", original, target="Group")
+    text, _ = cfg.add("even.child.corp.example", text)
+    assert YAML(typ="safe").load(text)["rules"][:3] == [
+        "DOMAIN-SUFFIX,even.child.corp.example,DIRECT",
+        "DOMAIN-SUFFIX,child.corp.example,Group",
+        "DOMAIN-SUFFIX,corp.example,DIRECT",
+    ]
+    with pytest.raises(ValueError, match="shadow.*special.other.example"):
+        cfg.add_match("other.example", text, target="Group")
+    with pytest.raises(ValueError, match="no matching non-DIRECT MATCH target"):
+        cfg.add_match("third.example", text, target="Old Group")
+
+
 def test_add_preserves_unrelated_indentless_lists(cfg):
     unrelated = "sniffer:\n  skip-domain:\n  - '+.unrelated.example'\n"
     text = "rules:\n- MATCH,DIRECT\ndns:\n  fake-ip-filter: []\n" + unrelated
